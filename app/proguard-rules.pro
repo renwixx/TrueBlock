@@ -1,0 +1,8 @@
+-dontwarn org.bouncycastle.**
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn org.conscrypt.**
+-dontwarn org.openjsse.**
+-keep @androidx.room.Entity class com.renwixx.trueadblocker.data.** { *; }
+-keep class com.renwixx.trueadblocker.data.AppTrafficRow { *; }
+-keep class * extends androidx.room.RoomDatabase { *; }
