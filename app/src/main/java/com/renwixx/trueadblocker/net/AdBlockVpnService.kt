@@ -649,6 +649,10 @@ class AdBlockVpnService : VpnService() {
 					continue
 
 				val ver = (readBuf[0].toInt() ushr 4) and 0x0F
+				if (ver == 6) {
+					l3.handleIpv6Packet(readBuf, len)
+					continue
+				}
 				if (ver != 4)
 					continue
 

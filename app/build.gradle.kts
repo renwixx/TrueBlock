@@ -91,6 +91,10 @@ android {
 		buildConfig = true
 	}
 
+	testOptions {
+		unitTests.isIncludeAndroidResources = true
+	}
+
 	packaging {
 		resources {
 			excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -123,6 +127,9 @@ dependencies {
 	implementation(libs.kotlinx.coroutines.android)
 
 	testImplementation(libs.junit)
+	testImplementation(libs.robolectric)
+	testImplementation(libs.androidx.test.core)
+	testImplementation(libs.kotlinx.coroutines.test)
 	androidTestImplementation(libs.androidx.junit)
 	androidTestImplementation(libs.androidx.espresso.core)
 	androidTestImplementation(platform(libs.androidx.compose.bom))

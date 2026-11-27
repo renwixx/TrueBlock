@@ -58,6 +58,7 @@ class TunL3Router(
 	)
 	private val _tcpSessions = ConcurrentHashMap<String, TcpFlowSession>(256)
 	private val _udpSessions = ConcurrentHashMap<String, UdpNatSession>(128)
+	private val _pendingSocks5Udp = ConcurrentHashMap<String, PendingSocks5Udp>(64)
 	private val _uidPkgCache = boundedMap<String, CachedFlowOwner>(1024)
 	private val _blockLogDedup = boundedMap<String, Long>(512)
 	private val _proxyUdpUnsupportedUntil = boundedMap<String, Long>(128)
@@ -75,6 +76,7 @@ class TunL3Router(
 		for (u in _udpSessions.values)
 			u.closeQuietly()
 		_udpSessions.clear()
+		_pendingSocks5Udp.clear()
 
 		synchronized(_fragLock) {
 			_fragBuckets.clear()
@@ -110,6 +112,45 @@ class TunL3Router(
 
 		val reassembled = reassembleIpv4Fragment(pkt, ihl, pktEnd, isMoreFrags, fragOffBytes) ?: return
 		dispatchCompleteIpv4(reassembled, 20, reassembled.size)
+	}
+
+	// Reject IPv6 immediately with TCPv6 RST / ICMPv6 Administratively Prohibited so dual-stack apps (e.g. Telegram libtgnet) fall back to IPv4 in <1ms
+	fun handleIpv6Packet(pkt: ByteArray, length: Int) {
+		if (!_isRunning || length < 40)
+			return
+		val ver = (pkt[0].toInt() ushr 4) and 0x0F
+		if (ver != 6)
+			return
+
+		val nextHeader = pkt[6].toInt() and 0xFF
+		val srcIp = pkt.copyOfRange(8, 24)
+		val dstIp = pkt.copyOfRange(24, 40)
+
+		if (nextHeader == 6 && length >= 60) {
+			val flags = pkt[53].toInt() and 0xFF
+			if ((flags and FLAG_RST) != 0)
+				return
+			val srcPort = u16(pkt, 40)
+			val dstPort = u16(pkt, 42)
+			val seqNum = u32(pkt, 44)
+			val ackNum = u32(pkt, 48)
+			val dataOff = ((pkt[52].toInt() ushr 4) and 0x0F) * 4
+			val payloadLen = (length - 40 - dataOff).coerceAtLeast(0)
+			val isSyn = (flags and FLAG_SYN) != 0
+			val isFin = (flags and FLAG_FIN) != 0
+			val isAck = (flags and FLAG_ACK) != 0
+			val rstSeq = if (isAck) ackNum else 0L
+			val rstAck = if (isAck) 0L else ((seqNum + payloadLen.toLong() + (if (isSyn) 1L else 0L) + (if (isFin) 1L else 0L)) and 0xFFFFFFFFL)
+			val rstFlags = if (isAck) FLAG_RST else (FLAG_RST or FLAG_ACK)
+			_writeTunPacket(buildIpv6TcpRst(dstIp, srcIp, dstPort, srcPort, rstSeq, rstAck, rstFlags))
+			return
+		}
+
+		// Do not generate ICMPv6 errors in response to ICMPv6 error messages (type < 128)
+		if (nextHeader == 58 && length >= 41 && (pkt[40].toInt() and 0xFF) < 128)
+			return
+
+		_writeTunPacket(buildIpv6Unreachable(dstIp, srcIp, pkt, length))
 	}
 
 	private fun dispatchCompleteIpv4(pkt: ByteArray, ihl: Int, pktEnd: Int) {
@@ -268,15 +309,35 @@ class TunL3Router(
 			val matchedProxy = UpstreamProxy.selectProxy(cfg.proxies, appPkg, host, dstPort, cfg.bypassedApps)
 			if (matchedProxy != null) {
 				if (matchedProxy.type.equals("SOCKS5", ignoreCase = true) && matchedProxy.isUdpRelay) {
-					val proxySession = getOrCreateSocks5UdpSession(natKey, matchedProxy, srcIp, srcPort, cfg.proxyConnectTimeoutMs)
-					if (proxySession != null) {
-						val socks5 = proxySession.socks5 ?: return
-						proxySession.lastActiveMs = System.currentTimeMillis()
+					val sessionKey = "$natKey|proxy:${matchedProxy.id}"
+					val existingProxy = _udpSessions[sessionKey]
+					if (existingProxy != null && !existingProxy.isClosed) {
+						val socks5 = existingProxy.socks5 ?: return
+						existingProxy.lastActiveMs = System.currentTimeMillis()
 						logProxyUdpSampleThrottled(appPkg, host, matchedProxy.name)
 						runCatching {
 							val wrapped = UpstreamProxy.wrapSocks5UdpPayload(dstIp, dstPort, payload)
 							socks5.udpSocket.send(DatagramPacket(wrapped, wrapped.size, socks5.relayAddress, socks5.relayPort))
 						}
+						return
+					}
+
+					val capKey = "${matchedProxy.id}|${matchedProxy.host.trim()}:${matchedProxy.port}"
+					val unsupportedUntil = _proxyUdpUnsupportedUntil[capKey] ?: 0L
+					if (unsupportedUntil <= System.currentTimeMillis()) {
+						enqueueAsyncSocks5Udp(
+							sessionKey = sessionKey,
+							capKey = capKey,
+							profile = matchedProxy,
+							clientIp = srcIp,
+							clientPort = srcPort,
+							dstIp = dstIp,
+							dstPort = dstPort,
+							payload = payload,
+							appPkg = appPkg,
+							host = host,
+							connectTimeoutMs = cfg.proxyConnectTimeoutMs,
+						)
 						return
 					}
 				}
@@ -317,19 +378,81 @@ class TunL3Router(
 		)
 	}
 
-	private fun getOrCreateSocks5UdpSession(
-		natKey: String,
+	private fun enqueueAsyncSocks5Udp(
+		sessionKey: String,
+		capKey: String,
+		profile: ProxyProfile,
+		clientIp: ByteArray,
+		clientPort: Int,
+		dstIp: ByteArray,
+		dstPort: Int,
+		payload: ByteArray,
+		appPkg: String,
+		host: String,
+		connectTimeoutMs: Int,
+	) {
+		val createdPending = PendingSocks5Udp()
+		val pending = _pendingSocks5Udp.putIfAbsent(sessionKey, createdPending) ?: createdPending
+		synchronized(pending) {
+			if (pending.queued.size < 16)
+				pending.queued.add(QueuedUdpDatagram(dstIp, dstPort, payload))
+		}
+		if (pending !== createdPending)
+			return
+
+		val isDispatched = runCatching {
+			_pool.execute {
+				try {
+					val session = createSocks5UdpSessionBlocking(sessionKey, capKey, profile, clientIp, clientPort, connectTimeoutMs)
+					val drained = synchronized(pending) {
+						val copy = ArrayList(pending.queued)
+						pending.queued.clear()
+						copy
+					}
+					if (session != null) {
+						val socks5 = session.socks5 ?: return@execute
+						session.lastActiveMs = System.currentTimeMillis()
+						logProxyUdpSampleThrottled(appPkg, host, profile.name)
+						for (dg in drained) {
+							runCatching {
+								val wrapped = UpstreamProxy.wrapSocks5UdpPayload(dg.dstIp, dg.dstPort, dg.payload)
+								socks5.udpSocket.send(DatagramPacket(wrapped, wrapped.size, socks5.relayAddress, socks5.relayPort))
+							}
+						}
+					} else if (!profile.isBlockUdpFallback) {
+						val natKey = "${formatIpv4(clientIp)}:$clientPort"
+						val direct = createFullConeUdpSession(natKey, clientIp, clientPort) ?: return@execute
+						for (dg in drained) {
+							if (dg.dstPort == 443)
+								continue
+							runCatching {
+								direct.sock.send(DatagramPacket(dg.payload, dg.payload.size, InetAddress.getByAddress(dg.dstIp), dg.dstPort))
+							}
+						}
+					}
+				} finally {
+					_pendingSocks5Udp.remove(sessionKey, pending)
+				}
+			}
+			true
+		}.getOrDefault(false)
+
+		if (!isDispatched)
+			_pendingSocks5Udp.remove(sessionKey, pending)
+	}
+
+	private fun createSocks5UdpSessionBlocking(
+		sessionKey: String,
+		capKey: String,
 		profile: ProxyProfile,
 		clientIp: ByteArray,
 		clientPort: Int,
 		connectTimeoutMs: Int,
 	): UdpNatSession? {
-		val sessionKey = "$natKey|proxy:${profile.id}"
 		val fast = _udpSessions[sessionKey]
 		if (fast != null && !fast.isClosed)
 			return fast
 
-		val capKey = "${profile.id}|${profile.host.trim()}:${profile.port}"
 		val now = System.currentTimeMillis()
 		val unsupportedUntil = _proxyUdpUnsupportedUntil[capKey] ?: 0L
 		if (unsupportedUntil > now)
@@ -338,64 +461,64 @@ class TunL3Router(
 		if (_udpSessions.size >= MAX_UDP_SESSIONS)
 			ensureUdpCapacity()
 
-		synchronized(_udpSessions) {
-			val existing = _udpSessions[sessionKey]
-			if (existing != null && !existing.isClosed)
-				return existing
+		val socks5 = UpstreamProxy.openSocks5UdpAssociate(
+			profile = profile,
+			connectTimeoutMs = connectTimeoutMs,
+			idleTimeoutMs = UDP_IDLE_TIMEOUT_MS.toInt(),
+			protectSocket = _protectSocket,
+			protectDatagram = _protectDatagram,
+			resolveHost = _resolveHostIp,
+		)
+		if (socks5 == null) {
+			_proxyUdpUnsupportedUntil[capKey] = System.currentTimeMillis() + 30_000L
+			return null
+		}
 
-			val socks5 = UpstreamProxy.openSocks5UdpAssociate(
-				profile = profile,
-				connectTimeoutMs = connectTimeoutMs,
-				idleTimeoutMs = UDP_IDLE_TIMEOUT_MS.toInt(),
-				protectSocket = _protectSocket,
-				protectDatagram = _protectDatagram,
-				resolveHost = _resolveHostIp,
-			)
-			if (socks5 == null) {
-				_proxyUdpUnsupportedUntil[capKey] = System.currentTimeMillis() + 30_000L
-				return null
-			}
-
-			val created = UdpNatSession(socks5.udpSocket, System.currentTimeMillis(), socks5)
+		val created = UdpNatSession(socks5.udpSocket, System.currentTimeMillis(), socks5)
+		val prev = _udpSessions.putIfAbsent(sessionKey, created)
+		if (prev != null && !prev.isClosed) {
+			created.closeQuietly()
+			return prev
+		}
+		if (prev != null)
 			_udpSessions[sessionKey] = created
 
-			val isStarted = runCatching {
-				_pool.execute {
-					val recvBuf = ByteArray(65_535)
-					try {
-						while (_isRunning && !created.isClosed) {
-							val dp = DatagramPacket(recvBuf, recvBuf.size)
-							try {
-								socks5.udpSocket.receive(dp)
-							} catch (_: SocketTimeoutException) {
-								if (System.currentTimeMillis() - created.lastActiveMs >= UDP_IDLE_TIMEOUT_MS)
-									break
-								continue
-							}
-							if (dp.length <= 10)
-								continue
-
-							val unwrapped = UpstreamProxy.unwrapSocks5UdpPacket(recvBuf, dp.length) ?: continue
-							created.lastActiveMs = System.currentTimeMillis()
-							writeUdpToTun(unwrapped.srcIp, clientIp, unwrapped.srcPort, clientPort, unwrapped.payload)
+		val isStarted = runCatching {
+			_pool.execute {
+				val recvBuf = ByteArray(65_535)
+				try {
+					while (_isRunning && !created.isClosed) {
+						val dp = DatagramPacket(recvBuf, recvBuf.size)
+						try {
+							socks5.udpSocket.receive(dp)
+						} catch (_: SocketTimeoutException) {
+							if (System.currentTimeMillis() - created.lastActiveMs >= UDP_IDLE_TIMEOUT_MS)
+								break
+							continue
 						}
-					} catch (_: Throwable) {
-					} finally {
-						_udpSessions.remove(sessionKey, created)
-						created.closeQuietly()
+						if (dp.length <= 10)
+							continue
+
+						val unwrapped = UpstreamProxy.unwrapSocks5UdpPacket(recvBuf, dp.length) ?: continue
+						created.lastActiveMs = System.currentTimeMillis()
+						writeUdpToTun(unwrapped.srcIp, clientIp, unwrapped.srcPort, clientPort, unwrapped.payload)
 					}
+				} catch (_: Throwable) {
+				} finally {
+					_udpSessions.remove(sessionKey, created)
+					created.closeQuietly()
 				}
-				true
-			}.getOrDefault(false)
-
-			if (!isStarted) {
-				_udpSessions.remove(sessionKey, created)
-				created.closeQuietly()
-				return null
 			}
+			true
+		}.getOrDefault(false)
 
-			return created
+		if (!isStarted) {
+			_udpSessions.remove(sessionKey, created)
+			created.closeQuietly()
+			return null
 		}
+
+		return created
 	}
 
 	private fun createFullConeUdpSession(
@@ -599,6 +722,7 @@ class TunL3Router(
 				serverNextSeq = initServerSeq,
 				clientLastAck = (initServerSeq + 1L) and 0xFFFFFFFFL,
 				clientWinShift = clientShift,
+				serverWinShift = if (serverShift >= 0) serverShift else 0,
 				clientWindow = rawWin.coerceAtLeast(_tcpMss * 4),
 			)
 			_tcpSessions[flowKey] = session
@@ -707,8 +831,11 @@ class TunL3Router(
 						val fresh = if (overlap == 0) payload else payload.copyOfRange(overlap, payload.size)
 						session.clientNextSeq = (session.clientNextSeq + fresh.size.toLong()) and 0xFFFFFFFFL
 						val combined = drainOutOfOrder(session, fresh)
+						session.queuedOutBytes += combined.size
 						session.outQueue.offer(TcpOutItem.Data(combined))
 					}
+					val advWinField = computeServerWinField(session)
+					session.lastAdvertisedServerWin = advWinField
 					ackReplyPkt = buildIpv4TcpPacket(
 						session.serverIp,
 						session.clientIp,
@@ -718,9 +845,12 @@ class TunL3Router(
 						session.clientNextSeq,
 						FLAG_ACK,
 						ByteArray(0),
+						windowSize = advWinField,
 					)
 				} else if (diff <= 524_288 && session.outOfOrder.size < 64) {
 					session.outOfOrder[seqNum] = payload
+					val advWinField = computeServerWinField(session)
+					session.lastAdvertisedServerWin = advWinField
 					ackReplyPkt = buildIpv4TcpPacket(
 						session.serverIp,
 						session.clientIp,
@@ -730,6 +860,7 @@ class TunL3Router(
 						session.clientNextSeq,
 						FLAG_ACK,
 						ByteArray(0),
+						windowSize = advWinField,
 					)
 				}
 			}
@@ -741,6 +872,8 @@ class TunL3Router(
 					session.outQueue.offer(TcpOutItem.Fin)
 					(session as Object).notifyAll()
 				}
+				val advWinField = computeServerWinField(session)
+				session.lastAdvertisedServerWin = advWinField
 				ackReplyPkt = buildIpv4TcpPacket(
 					session.serverIp,
 					session.clientIp,
@@ -750,6 +883,7 @@ class TunL3Router(
 					session.clientNextSeq,
 					FLAG_ACK,
 					ByteArray(0),
+					windowSize = advWinField,
 				)
 			}
 		}
@@ -942,6 +1076,30 @@ class TunL3Router(
 								out.write(item.bytes)
 								if (session.outQueue.isEmpty())
 									out.flush()
+								var winUpdatePkt: ByteArray? = null
+								synchronized(session) {
+									session.lastActiveMs = System.currentTimeMillis()
+									session.queuedOutBytes = (session.queuedOutBytes - item.bytes.size).coerceAtLeast(0)
+									val prevWinBytes = session.lastAdvertisedServerWin shl session.serverWinShift
+									val nextWinField = computeServerWinField(session)
+									val nextWinBytes = nextWinField shl session.serverWinShift
+									if (!session.isClosed && prevWinBytes < MAX_UPLOAD_BUF_BYTES / 2 && nextWinBytes - prevWinBytes >= 65_536) {
+										session.lastAdvertisedServerWin = nextWinField
+										winUpdatePkt = buildIpv4TcpPacket(
+											session.serverIp,
+											session.clientIp,
+											session.serverPort,
+											session.clientPort,
+											session.serverNextSeq,
+											session.clientNextSeq,
+											FLAG_ACK,
+											ByteArray(0),
+											windowSize = nextWinField,
+										)
+									}
+								}
+								if (winUpdatePkt != null)
+									_writeTunPacket(winUpdatePkt!!)
 							}
 							TcpOutItem.Fin -> {
 								runCatching { out.flush() }
@@ -1061,6 +1219,8 @@ class TunL3Router(
 					val sSeq = session.serverNextSeq
 					session.serverNextSeq = (sSeq + n.toLong()) and 0xFFFFFFFFL
 					session.unacked[sSeq] = SentTcpSegment(sSeq, chunk, now)
+					val advWinField = computeServerWinField(session)
+					session.lastAdvertisedServerWin = advWinField
 					dataPkt = buildIpv4TcpPacket(
 						dstIp,
 						srcIp,
@@ -1070,6 +1230,7 @@ class TunL3Router(
 						session.clientNextSeq,
 						FLAG_PSH or FLAG_ACK,
 						chunk,
+						windowSize = advWinField,
 					)
 				}
 				_writeTunPacket(dataPkt)
@@ -1342,6 +1503,7 @@ class TunL3Router(
 		private const val DEFAULT_TCP_MSS = 1360
 		private const val SERVER_WIN_SCALE = 7
 		private const val MAX_IN_FLIGHT_BYTES = 262_144
+		private const val MAX_UPLOAD_BUF_BYTES = 262_144
 		private const val TCP_READ_TICK_MS = 250
 		private const val TCP_RTO_MS = 300L
 		private const val TCP_HALF_CLOSED_TIMEOUT_MS = 15_000L
@@ -1349,6 +1511,107 @@ class TunL3Router(
 		private const val UDP_IDLE_TIMEOUT_MS = 180_000L
 		private const val MAX_TCP_SESSIONS = 768
 		private const val MAX_UDP_SESSIONS = 384
+
+		private fun computeServerWinField(session: TcpFlowSession): Int {
+			val avail = (MAX_UPLOAD_BUF_BYTES - session.queuedOutBytes).coerceAtLeast(0)
+
+			return (avail ushr session.serverWinShift).coerceIn(0, 0xFFFF)
+		}
+
+		internal fun buildIpv6TcpRst(
+			srcIp: ByteArray,
+			dstIp: ByteArray,
+			srcPort: Int,
+			dstPort: Int,
+			seqNum: Long,
+			ackNum: Long,
+			flags: Int,
+		): ByteArray {
+			val out = ByteArray(60)
+			out[0] = 0x60
+			out[4] = 0x00
+			out[5] = 20
+			out[6] = 6
+			out[7] = 64
+			System.arraycopy(srcIp, 0, out, 8, 16)
+			System.arraycopy(dstIp, 0, out, 24, 16)
+
+			out[40] = ((srcPort ushr 8) and 0xFF).toByte()
+			out[41] = (srcPort and 0xFF).toByte()
+			out[42] = ((dstPort ushr 8) and 0xFF).toByte()
+			out[43] = (dstPort and 0xFF).toByte()
+			writeU32(out, 44, seqNum)
+			writeU32(out, 48, ackNum)
+			out[52] = 0x50
+			out[53] = (flags and 0xFF).toByte()
+
+			val csum = ipv6UpperChecksum(srcIp, dstIp, 6, out, 40, 20)
+			out[56] = ((csum ushr 8) and 0xFF).toByte()
+			out[57] = (csum and 0xFF).toByte()
+
+			return out
+		}
+
+		// RFC 4443 section 3.1 ICMPv6 Destination Unreachable (Type 1, Code 1: Communication Administratively Prohibited)
+		internal fun buildIpv6Unreachable(
+			srcIp: ByteArray,
+			dstIp: ByteArray,
+			origPkt: ByteArray,
+			origLen: Int,
+		): ByteArray {
+			val quotedLen = origLen.coerceAtMost(1232)
+			val icmpLen = 8 + quotedLen
+			val out = ByteArray(40 + icmpLen)
+			out[0] = 0x60
+			out[4] = ((icmpLen ushr 8) and 0xFF).toByte()
+			out[5] = (icmpLen and 0xFF).toByte()
+			out[6] = 58
+			out[7] = 64
+			System.arraycopy(srcIp, 0, out, 8, 16)
+			System.arraycopy(dstIp, 0, out, 24, 16)
+
+			out[40] = 1
+			out[41] = 1
+			System.arraycopy(origPkt, 0, out, 48, quotedLen)
+
+			val csum = ipv6UpperChecksum(srcIp, dstIp, 58, out, 40, icmpLen)
+			out[42] = ((csum ushr 8) and 0xFF).toByte()
+			out[43] = (csum and 0xFF).toByte()
+
+			return out
+		}
+
+		internal fun ipv6UpperChecksum(
+			srcIp: ByteArray,
+			dstIp: ByteArray,
+			nextHeader: Int,
+			buf: ByteArray,
+			offset: Int,
+			len: Int,
+		): Int {
+			var sum = 0
+			for (i in 0 until 16 step 2) {
+				sum += ((srcIp[i].toInt() and 0xFF) shl 8) or (srcIp[i + 1].toInt() and 0xFF)
+				sum += ((dstIp[i].toInt() and 0xFF) shl 8) or (dstIp[i + 1].toInt() and 0xFF)
+			}
+			sum += (len ushr 16) and 0xFFFF
+			sum += len and 0xFFFF
+			sum += nextHeader and 0xFF
+
+			var i = offset
+			val end = offset + len
+			while (i < end - 1) {
+				sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+				i += 2
+			}
+			if (i < end)
+				sum += (buf[i].toInt() and 0xFF) shl 8
+
+			while ((sum ushr 16) != 0)
+				sum = (sum and 0xFFFF) + (sum ushr 16)
+
+			return sum.inv() and 0xFFFF
+		}
 
 		internal fun parseSynWindowScale(pkt: ByteArray, ihl: Int, tcpHeaderLen: Int): Int {
 			var pos = ihl + 20
@@ -1596,6 +1859,16 @@ private class CachedFlowOwner(
 	val expiresAt: Long,
 )
 
+private class QueuedUdpDatagram(
+	val dstIp: ByteArray,
+	val dstPort: Int,
+	val payload: ByteArray,
+)
+
+private class PendingSocks5Udp {
+	val queued = ArrayList<QueuedUdpDatagram>(4)
+}
+
 private class UdpNatSession(
 	val sock: DatagramSocket,
 	@Volatile var lastActiveMs: Long,
@@ -1633,6 +1906,7 @@ private class TcpFlowSession(
 	var serverNextSeq: Long,
 	var clientLastAck: Long,
 	val clientWinShift: Int,
+	val serverWinShift: Int,
 	var clientWindow: Int,
 ) {
 	@Volatile
@@ -1647,6 +1921,8 @@ private class TcpFlowSession(
 	@Volatile
 	var lastActiveMs: Long = System.currentTimeMillis()
 
+	var queuedOutBytes: Int = 0
+	var lastAdvertisedServerWin: Int = 0xFFFF
 	var dupAckCount: Int = 0
 	var synAckPacket: ByteArray? = null
 	var upstream: Socket? = null
