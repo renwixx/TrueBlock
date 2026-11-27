@@ -46,6 +46,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -69,6 +70,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.renwixx.trueadblocker.data.BLOCKED_DNS_NODATA
 import com.renwixx.trueadblocker.data.BLOCKED_DNS_NXDOMAIN
 import com.renwixx.trueadblocker.data.BLOCKED_DNS_ZERO_IP
@@ -113,23 +116,19 @@ fun AnalyticsScreen(vm: MainViewModel) {
 	val blockRatio = if (totalReq > 0L) (totalBlocked.toDouble() * 100.0 / totalReq.toDouble()) else 0.0
 	val fmt = remember { NumberFormat.getIntegerInstance(Locale.US) }
 
-	Column(
-		modifier = Modifier
-			.fillMaxSize()
-			.verticalScroll(rememberScrollState())
-			.padding(horizontal = 16.dp, vertical = 12.dp),
-	) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier.fillMaxWidth(),
-		) {
-			Text("Analytics", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+	Column(modifier = Modifier.fillMaxSize()) {
+		ScreenHeader(title = "Analytics") {
 			IconButton(onClick = { vm.refreshAnalytics() }) {
 				Icon(Icons.Default.Refresh, contentDescription = "Refresh analytics")
 			}
 		}
 
-		Spacer(Modifier.height(10.dp))
+		Column(
+			modifier = Modifier
+				.fillMaxSize()
+				.verticalScroll(rememberScrollState())
+				.padding(horizontal = 16.dp, vertical = 4.dp),
+		) {
 
 		Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
 			KpiStatCard(
@@ -286,6 +285,7 @@ fun AnalyticsScreen(vm: MainViewModel) {
 		}
 
 		Spacer(Modifier.height(24.dp))
+		}
 	}
 
 	if (isParamEditorOpen) {
@@ -515,21 +515,17 @@ fun ProxiesSubView(
 	var isAddingNew by remember { mutableStateOf(false) }
 
 	Column(modifier = Modifier.fillMaxSize()) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+		ScreenHeader(
+			title = "Per-App Proxies",
+			onBack = onBack,
 		) {
-			IconButton(onClick = onBack) {
-				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-			}
-			Text("Per-App Proxies", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
 			Button(
 				onClick = { isAddingNew = true },
-				modifier = Modifier.padding(end = 8.dp),
+				contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
 			) {
 				Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
 				Spacer(Modifier.width(4.dp))
-				Text("Add Proxy", maxLines = 1, softWrap = false)
+				Text("Add Proxy", fontSize = 12.5.sp, maxLines = 1, softWrap = false)
 			}
 		}
 
@@ -645,6 +641,7 @@ fun ProxiesSubView(
 		ProxyEditorDialog(
 			initial = null,
 			installedApps = apps,
+			getCachedIcon = { pkg -> vm.getCachedAppIcon(pkg) },
 			getIcon = { pkg -> vm.getAppIcon(pkg) },
 			onDismiss = { isAddingNew = false },
 			onSave = { created ->
@@ -658,6 +655,7 @@ fun ProxiesSubView(
 		ProxyEditorDialog(
 			initial = existing,
 			installedApps = apps,
+			getCachedIcon = { pkg -> vm.getCachedAppIcon(pkg) },
 			getIcon = { pkg -> vm.getAppIcon(pkg) },
 			onDismiss = { editingProfile = null },
 			onSave = { updated ->
@@ -672,6 +670,7 @@ fun ProxiesSubView(
 private fun ProxyEditorDialog(
 	initial: ProxyProfile?,
 	installedApps: List<InstalledAppItem>,
+	getCachedIcon: (String) -> ImageBitmap?,
 	getIcon: suspend (String) -> ImageBitmap?,
 	onDismiss: () -> Unit,
 	onSave: (ProxyProfile) -> Unit,
@@ -698,6 +697,7 @@ private fun ProxyEditorDialog(
 		AppMultiSelectDialog(
 			allApps = installedApps,
 			selected = selectedPkgs,
+			getCachedIcon = getCachedIcon,
 			getIcon = getIcon,
 			onDismiss = { isPickingApps = false },
 			onConfirm = { picked ->
@@ -708,182 +708,224 @@ private fun ProxyEditorDialog(
 		return
 	}
 
-	AlertDialog(
+	Dialog(
 		onDismissRequest = onDismiss,
-		containerColor = MaterialTheme.colorScheme.surface,
-		title = { Text(if (initial == null) "New Proxy Profile" else "Edit Proxy Profile") },
-		text = {
-			Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-				Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-					FilterChip(
-						selected = type.equals("SOCKS5", ignoreCase = true),
-						onClick = { type = "SOCKS5" },
-						label = { Text("SOCKS5", maxLines = 1, softWrap = false) },
-					)
-					FilterChip(
-						selected = type.equals("HTTP", ignoreCase = true),
-						onClick = { type = "HTTP" },
-						label = { Text("HTTP CONNECT", maxLines = 1, softWrap = false) },
-					)
-				}
-
-				Spacer(Modifier.height(8.dp))
-				OutlinedTextField(
-					value = name,
-					onValueChange = { name = it },
-					label = { Text("Profile Name (e.g. WhatsApp SOCKS5)") },
-					singleLine = true,
-					modifier = Modifier.fillMaxWidth(),
+		properties = DialogProperties(usePlatformDefaultWidth = false),
+	) {
+		Surface(
+			shape = RoundedCornerShape(20.dp),
+			color = MaterialTheme.colorScheme.surface,
+			tonalElevation = 6.dp,
+			modifier = Modifier
+				.fillMaxWidth(0.94f)
+				.padding(vertical = 16.dp),
+		) {
+			Column(
+				modifier = Modifier
+					.fillMaxWidth()
+					.padding(horizontal = 18.dp, vertical = 16.dp),
+			) {
+				Text(
+					text = if (initial == null) "New Proxy Profile" else "Edit Proxy Profile",
+					fontSize = 19.sp,
+					fontWeight = FontWeight.Bold,
 				)
+				Spacer(Modifier.height(10.dp))
 
-				Spacer(Modifier.height(8.dp))
-				Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-					OutlinedTextField(
-						value = host,
-						onValueChange = { host = it },
-						label = { Text("Proxy Host / IP") },
-						singleLine = true,
-						modifier = Modifier.weight(1.8f),
-					)
-					OutlinedTextField(
-						value = portText,
-						onValueChange = { portText = it.filter { c -> c.isDigit() }.take(5) },
-						label = { Text("Port") },
-						singleLine = true,
-						modifier = Modifier.weight(1f),
-					)
-				}
-
-				Spacer(Modifier.height(8.dp))
-				Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-					OutlinedTextField(
-						value = username,
-						onValueChange = { username = it },
-						label = { Text("Username (optional)") },
-						singleLine = true,
-						modifier = Modifier.weight(1f),
-					)
-					OutlinedTextField(
-						value = password,
-						onValueChange = { password = it },
-						label = { Text("Password (optional)") },
-						singleLine = true,
-						modifier = Modifier.weight(1f),
-					)
-				}
-
-				Spacer(Modifier.height(6.dp))
-				Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-					Column(modifier = Modifier.weight(1f)) {
-						Text("Remote DNS via Proxy", fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
-						Text("Tunnels DNS & sends domain names to proxy to prevent ISP DNS leaks", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+				Column(
+					modifier = Modifier
+						.fillMaxWidth()
+						.weight(1f, fill = false)
+						.verticalScroll(rememberScrollState())
+						.padding(top = 4.dp),
+				) {
+					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+						FilterChip(
+							selected = type.equals("SOCKS5", ignoreCase = true),
+							onClick = { type = "SOCKS5" },
+							label = { Text("SOCKS5", maxLines = 1, softWrap = false) },
+						)
+						FilterChip(
+							selected = type.equals("HTTP", ignoreCase = true),
+							onClick = { type = "HTTP" },
+							label = { Text("HTTP CONNECT", maxLines = 1, softWrap = false) },
+						)
 					}
-					Switch(checked = isRemoteDns, onCheckedChange = { isRemoteDns = it })
-				}
 
-				if (type.equals("SOCKS5", ignoreCase = true)) {
-					Spacer(Modifier.height(6.dp))
+					Spacer(Modifier.height(8.dp))
+					OutlinedTextField(
+						value = name,
+						onValueChange = { name = it },
+						label = { Text("Profile Name", maxLines = 1) },
+						placeholder = { Text("e.g. Steam / WhatsApp SOCKS5", maxLines = 1) },
+						singleLine = true,
+						modifier = Modifier.fillMaxWidth(),
+					)
+
+					Spacer(Modifier.height(8.dp))
+					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+						OutlinedTextField(
+							value = host,
+							onValueChange = { host = it },
+							label = { Text("Host / IP", maxLines = 1) },
+							singleLine = true,
+							modifier = Modifier.weight(1.9f),
+						)
+						OutlinedTextField(
+							value = portText,
+							onValueChange = { portText = it.filter { c -> c.isDigit() }.take(5) },
+							label = { Text("Port", maxLines = 1) },
+							singleLine = true,
+							modifier = Modifier.weight(1f),
+						)
+					}
+
+					Spacer(Modifier.height(8.dp))
+					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+						OutlinedTextField(
+							value = username,
+							onValueChange = { username = it },
+							label = { Text("Username", maxLines = 1) },
+							placeholder = { Text("Optional", maxLines = 1) },
+							singleLine = true,
+							modifier = Modifier.weight(1f),
+						)
+						OutlinedTextField(
+							value = password,
+							onValueChange = { password = it },
+							label = { Text("Password", maxLines = 1) },
+							placeholder = { Text("Optional", maxLines = 1) },
+							singleLine = true,
+							modifier = Modifier.weight(1f),
+						)
+					}
+
+					Spacer(Modifier.height(10.dp))
 					Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
 						Column(modifier = Modifier.weight(1f)) {
-							Text("UDP Relay (SOCKS5 UDP ASSOCIATE)", fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
-							Text("Proxies UDP traffic (calls, WebRTC, games, QUIC) if server supports RFC 1928 UDP", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+							Text("Remote DNS via Proxy", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+							Text("Tunnels DNS & resolves hostnames via proxy", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 						}
-						Switch(checked = isUdpRelay, onCheckedChange = { isUdpRelay = it })
+						Spacer(Modifier.width(10.dp))
+						Switch(checked = isRemoteDns, onCheckedChange = { isRemoteDns = it })
 					}
-				}
 
-				Spacer(Modifier.height(6.dp))
-				Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-					Column(modifier = Modifier.weight(1f)) {
-						Text("Block Unproxied UDP (Prevent Real IP Leak)", fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
-						Text("Drops direct UDP when using HTTP CONNECT or if SOCKS5 server lacks UDP support", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+					if (type.equals("SOCKS5", ignoreCase = true)) {
+						Spacer(Modifier.height(8.dp))
+						Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+							Column(modifier = Modifier.weight(1f)) {
+								Text("UDP Relay (SOCKS5 UDP)", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+								Text("Proxies calls, WebRTC, games & QUIC if server supports UDP", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+							}
+							Spacer(Modifier.width(10.dp))
+							Switch(checked = isUdpRelay, onCheckedChange = { isUdpRelay = it })
+						}
 					}
-					Switch(checked = isBlockUdpFallback, onCheckedChange = { isBlockUdpFallback = it })
-				}
 
-				Spacer(Modifier.height(8.dp))
-				Text("App Routing Filter", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
-				Spacer(Modifier.height(4.dp))
-				Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-					FilterChip(
-						selected = !isAllApps,
-						onClick = { isAllApps = false },
-						label = { Text("Selected Apps (${selectedPkgs.size})", maxLines = 1, softWrap = false) },
-					)
-					FilterChip(
-						selected = isAllApps,
-						onClick = { isAllApps = true },
-						label = { Text("All Apps", maxLines = 1, softWrap = false) },
-					)
-				}
-
-				if (!isAllApps) {
-					Spacer(Modifier.height(6.dp))
-					OutlinedButton(
-						onClick = { isPickingApps = true },
-						modifier = Modifier.fillMaxWidth(),
-					) {
-						Text("Choose Apps (${selectedPkgs.size} selected — e.g. WhatsApp)")
+					Spacer(Modifier.height(8.dp))
+					Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+						Column(modifier = Modifier.weight(1f)) {
+							Text("Block Unproxied UDP", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+							Text("Prevents real IP leak when UDP relay is unavailable", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+						}
+						Spacer(Modifier.width(10.dp))
+						Switch(checked = isBlockUdpFallback, onCheckedChange = { isBlockUdpFallback = it })
 					}
-				}
 
-				Spacer(Modifier.height(8.dp))
-				Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-					OutlinedTextField(
-						value = hostFilter,
-						onValueChange = { hostFilter = it },
-						label = { Text("Host Filter (* or *.org)") },
-						singleLine = true,
-						modifier = Modifier.weight(1.3f),
-					)
-					OutlinedTextField(
-						value = portFilter,
-						onValueChange = { portFilter = it },
-						label = { Text("Ports (* or 443,5222)") },
-						singleLine = true,
-						modifier = Modifier.weight(1f),
-					)
-				}
-			}
-		},
-		confirmButton = {
-			Button(
-				enabled = isValid,
-				onClick = {
-					onSave(
-						ProxyProfile(
-							id = initial?.id ?: "proxy_${System.currentTimeMillis()}",
-							name = name.trim().ifEmpty { "$type Proxy" },
-							isEnabled = initial?.isEnabled ?: true,
-							type = type,
-							host = host.trim(),
-							port = portNum,
-							username = username.trim(),
-							password = password,
-							isRemoteDns = isRemoteDns,
-							isUdpRelay = isUdpRelay,
-							isBlockUdpFallback = isBlockUdpFallback,
-							isAllApps = isAllApps,
-							appPackages = selectedPkgs,
-							hostFilter = hostFilter.trim().ifEmpty { "*" },
-							portFilter = portFilter.trim().ifEmpty { "*" },
+					Spacer(Modifier.height(12.dp))
+					Text("App Routing Filter", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+					Spacer(Modifier.height(4.dp))
+					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+						FilterChip(
+							selected = !isAllApps,
+							onClick = { isAllApps = false },
+							label = { Text("Selected Apps (${selectedPkgs.size})", maxLines = 1, softWrap = false) },
 						)
-					)
-				},
-			) {
-				Text("Save")
+						FilterChip(
+							selected = isAllApps,
+							onClick = { isAllApps = true },
+							label = { Text("All Apps", maxLines = 1, softWrap = false) },
+						)
+					}
+
+					if (!isAllApps) {
+						Spacer(Modifier.height(6.dp))
+						OutlinedButton(
+							onClick = { isPickingApps = true },
+							modifier = Modifier.fillMaxWidth(),
+						) {
+							Text("Choose Apps (${selectedPkgs.size} selected)", maxLines = 1, overflow = TextOverflow.Ellipsis)
+						}
+					}
+
+					Spacer(Modifier.height(8.dp))
+					Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+						OutlinedTextField(
+							value = hostFilter,
+							onValueChange = { hostFilter = it },
+							label = { Text("Host Filter", maxLines = 1) },
+							placeholder = { Text("* or *.org", maxLines = 1) },
+							singleLine = true,
+							modifier = Modifier.weight(1.3f),
+						)
+						OutlinedTextField(
+							value = portFilter,
+							onValueChange = { portFilter = it },
+							label = { Text("Ports", maxLines = 1) },
+							placeholder = { Text("* or 443,5222", maxLines = 1) },
+							singleLine = true,
+							modifier = Modifier.weight(1f),
+						)
+					}
+				}
+
+				Spacer(Modifier.height(14.dp))
+				Row(
+					horizontalArrangement = Arrangement.End,
+					verticalAlignment = Alignment.CenterVertically,
+					modifier = Modifier.fillMaxWidth(),
+				) {
+					TextButton(onClick = onDismiss) {
+						Text("Cancel")
+					}
+					Spacer(Modifier.width(8.dp))
+					Button(
+						enabled = isValid,
+						onClick = {
+							onSave(
+								ProxyProfile(
+									id = initial?.id ?: "proxy_${System.currentTimeMillis()}",
+									name = name.trim().ifEmpty { "$type Proxy" },
+									isEnabled = initial?.isEnabled ?: true,
+									type = type,
+									host = host.trim(),
+									port = portNum,
+									username = username.trim(),
+									password = password,
+									isRemoteDns = isRemoteDns,
+									isUdpRelay = isUdpRelay,
+									isBlockUdpFallback = isBlockUdpFallback,
+									isAllApps = isAllApps,
+									appPackages = selectedPkgs,
+									hostFilter = hostFilter.trim().ifEmpty { "*" },
+									portFilter = portFilter.trim().ifEmpty { "*" },
+								)
+							)
+						},
+					) {
+						Text("Save")
+					}
+				}
 			}
-		},
-		dismissButton = {
-			TextButton(onClick = onDismiss) { Text("Cancel") }
-		},
-	)
+		}
+	}
 }
 
 @Composable
 private fun AppMultiSelectDialog(
 	allApps: List<InstalledAppItem>,
 	selected: Set<String>,
+	getCachedIcon: (String) -> ImageBitmap?,
 	getIcon: suspend (String) -> ImageBitmap?,
 	onDismiss: () -> Unit,
 	onConfirm: (Set<String>) -> Unit,
@@ -922,8 +964,10 @@ private fun AppMultiSelectDialog(
 				LazyColumn(modifier = Modifier.height(320.dp)) {
 					items(shown, key = { it.packageName }) { app ->
 						val isChecked = currentSet.contains(app.packageName)
-						val bmp by produceState<ImageBitmap?>(initialValue = null, key1 = app.packageName) {
-							value = getIcon(app.packageName)
+						val cachedBmp = remember(app.packageName) { getCachedIcon(app.packageName) }
+						val bmp by produceState(initialValue = cachedBmp, key1 = app.packageName) {
+							if (value == null)
+								value = getIcon(app.packageName)
 						}
 						Row(
 							verticalAlignment = Alignment.CenterVertically,
@@ -1043,19 +1087,11 @@ fun EngineConfigSubView(
 		}
 	}
 
-	Column(
-		modifier = Modifier
-			.fillMaxSize()
-			.verticalScroll(rememberScrollState()),
-	) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+	Column(modifier = Modifier.fillMaxSize()) {
+		ScreenHeader(
+			title = "Live Engine Config",
+			onBack = onBack,
 		) {
-			IconButton(onClick = onBack) {
-				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-			}
-			Text("Live Engine Config", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
 			TextButton(onClick = { vm.resetEngineTuning() }) {
 				Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
 				Spacer(Modifier.width(4.dp))
@@ -1065,7 +1101,10 @@ fun EngineConfigSubView(
 
 		Column(
 			verticalArrangement = Arrangement.spacedBy(14.dp),
-			modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+			modifier = Modifier
+				.fillMaxSize()
+				.verticalScroll(rememberScrollState())
+				.padding(horizontal = 16.dp, vertical = 8.dp),
 		) {
 			Text(
 				text = "All parameters apply live on the fly. Active proxy port: ${vpn.proxyPort} • L3 router: ${if (vpn.isL3CaptureActive) "ACTIVE" else "STANDBY"}",

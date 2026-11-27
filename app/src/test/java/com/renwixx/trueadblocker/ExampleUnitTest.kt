@@ -19,6 +19,7 @@ import com.renwixx.trueadblocker.net.DnsWire
 import com.renwixx.trueadblocker.net.MitmProxy
 import com.renwixx.trueadblocker.net.TunL3Router
 import com.renwixx.trueadblocker.net.UpstreamProxy
+import com.renwixx.trueadblocker.ui.shortenUrlForDisplay
 import java.io.ByteArrayOutputStream
 import java.security.cert.CertPathValidator
 import java.security.cert.CertificateFactory
@@ -1157,5 +1158,23 @@ class ExampleUnitTest {
 		val emptySections = BackupSections(false, false, false, false, false)
 		assertTrue(listsOnly.hasAnySelected)
 		assertFalse(emptySections.hasAnySelected)
+	}
+
+	@Test
+	fun responseTypeClassificationAndUrlShortening() {
+		assertEquals("image" to "webp", MitmProxy.classifyResponseType("/cdn/photo", "image/webp"))
+		assertEquals("video" to "mp4", MitmProxy.classifyResponseType("/stream/clip.mp4?t=1", "video/mp4"))
+		assertEquals("audio" to "mp3", MitmProxy.classifyResponseType("/track.mp3", "audio/mpeg"))
+		assertEquals(
+			"file" to "apk",
+			MitmProxy.classifyResponseType("/dl/get", "application/octet-stream", "attachment; filename=\"app-release.apk\""),
+		)
+		assertEquals("default" to "", MitmProxy.classifyResponseType("/api/v2/feed", "application/json; charset=utf-8"))
+
+		assertEquals(
+			"cdn.example.com/api/…/items?…",
+			shortenUrlForDisplay("cdn.example.com/api/v2/users/42/items?token=secret&page=3"),
+		)
+		assertEquals("example.com/short", shortenUrlForDisplay("example.com/short"))
 	}
 }

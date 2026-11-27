@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.util.LruCache
 import androidx.compose.ui.graphics.ImageBitmap
@@ -24,6 +25,7 @@ import com.renwixx.trueadblocker.data.BackupSections
 import com.renwixx.trueadblocker.data.BlocklistSource
 import com.renwixx.trueadblocker.data.CustomRule
 import com.renwixx.trueadblocker.data.HourlyBucket
+import com.renwixx.trueadblocker.data.HttpsDomainGroup
 import com.renwixx.trueadblocker.data.MODE_EXACT
 import com.renwixx.trueadblocker.data.MODE_WILDCARD
 import com.renwixx.trueadblocker.data.ProxyProfile
@@ -51,6 +53,8 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.Collections
@@ -67,6 +71,12 @@ data class ActivityFilter(
 	val isTopSort: Boolean = false,
 	val viewMode: Int = ACTIVITY_MODE_GROUPED,
 	val isHttpsLiveStream: Boolean = false,
+	val appPkgFilter: String = "",
+	val isShortenUrls: Boolean = true,
+	val isGroupHttpsByDomain: Boolean = false,
+	val selectedHttpsDomain: String = "",
+	val responseTypeFilter: String = "",
+	val customFileExt: String = "",
 )
 
 data class RuleFilter(
@@ -116,6 +126,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 	val blocklists: StateFlow<List<BlocklistSource>> = _db.blocklistDao().observeAll()
 		.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+	val loggedApps: StateFlow<List<String>> = _db.trafficDao().observeLoggedAppPackages()
+		.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
 	private val _activityFilter = MutableStateFlow(ActivityFilter())
 	val activityFilter: StateFlow<ActivityFilter> = _activityFilter.asStateFlow()
 
@@ -161,7 +174,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 	private val _labelRevision = MutableStateFlow(0)
 	val labelRevision: StateFlow<Int> = _labelRevision.asStateFlow()
 
-	private val _iconCache = LruCache<String, ImageBitmap>(180)
+	private val _iconCache = LruCache<String, ImageBitmap>(400)
+	private val _iconCacheDir = File(_app.cacheDir, "app_icons").apply { mkdirs() }
 	private val _fastLabels = ConcurrentHashMap<String, String>(128)
 	private val _pendingLookups: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
@@ -187,12 +201,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 		.flatMapLatest { f ->
 			val routeMode = if (f.viewMode == ACTIVITY_MODE_HTTPS_URLS) 1 else 0
 			val safeQuery = escapeSqlLike(f.query.trim())
+			val typeF = if (f.viewMode == ACTIVITY_MODE_HTTPS_URLS) f.responseTypeFilter else ""
+			val extF = if (typeF == "file") escapeSqlLike(f.customFileExt.trim().lowercase().removePrefix(".")) else ""
+			val hostF = if (f.viewMode == ACTIVITY_MODE_HTTPS_URLS && f.isGroupHttpsByDomain) f.selectedHttpsDomain else ""
 			Pager(_pagingCfg) {
 				if (f.isTopSort) {
-					_db.trafficDao().pageTop(safeQuery, f.blockFilter, routeMode)
+					_db.trafficDao().pageTop(safeQuery, f.blockFilter, routeMode, f.appPkgFilter, typeF, extF, hostF)
 				} else {
-					_db.trafficDao().pageRecent(safeQuery, f.blockFilter, routeMode)
+					_db.trafficDao().pageRecent(safeQuery, f.blockFilter, routeMode, f.appPkgFilter, typeF, extF, hostF)
 				}
+			}.flow
+		}
+		.cachedIn(viewModelScope)
+
+	val pagedHttpsDomains: Flow<PagingData<HttpsDomainGroup>> = _activityFilter
+		.flatMapLatest { f ->
+			val safeQuery = escapeSqlLike(f.query.trim())
+			val extF = if (f.responseTypeFilter == "file") escapeSqlLike(f.customFileExt.trim().lowercase().removePrefix(".")) else ""
+			Pager(_pagingCfg) {
+				_db.trafficDao().pageHttpsDomains(
+					q = safeQuery,
+					blockFilter = f.blockFilter,
+					appPkg = f.appPkgFilter,
+					typeFilter = f.responseTypeFilter,
+					customExt = extF,
+					isTopSort = if (f.isTopSort) 1 else 0,
+				)
 			}.flow
 		}
 		.cachedIn(viewModelScope)
@@ -201,8 +235,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 		.flatMapLatest { f ->
 			val routesFlag = if (f.viewMode == ACTIVITY_MODE_HTTPS_URLS) 1 else 0
 			val safeQuery = escapeSqlLike(f.query.trim())
+			val typeF = if (f.viewMode == ACTIVITY_MODE_HTTPS_URLS) f.responseTypeFilter else ""
+			val extF = if (typeF == "file") escapeSqlLike(f.customFileExt.trim().lowercase().removePrefix(".")) else ""
 			Pager(_pagingCfg) {
-				_db.trafficDao().pageRaw(safeQuery, f.blockFilter, routesFlag)
+				_db.trafficDao().pageRaw(safeQuery, f.blockFilter, routesFlag, f.appPkgFilter, typeF, extF)
 			}.flow
 		}
 		.cachedIn(viewModelScope)
@@ -554,24 +590,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 			_installedApps.value = list
 			_labelRevision.value = _labelRevision.value + 1
 			_isAppsLoading.value = false
+
+			for (item in list) {
+				if (!item.isSystem && _iconCache.get(item.packageName) == null)
+					loadAndCacheIconSync(item.packageName)
+			}
 		}
 	}
+
+	fun getCachedAppIcon(packageName: String): ImageBitmap? = _iconCache.get(packageName)
 
 	suspend fun getAppIcon(packageName: String): ImageBitmap? {
 		_iconCache.get(packageName)?.let { return it }
 
 		return withContext(Dispatchers.IO) {
-			runCatching {
-				val d = _app.packageManager.getApplicationIcon(packageName)
-				val w = d.intrinsicWidth.coerceIn(48, 128)
-				val h = d.intrinsicHeight.coerceIn(48, 128)
-				val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-				val canvas = Canvas(bmp)
-				d.setBounds(0, 0, w, h)
-				d.draw(canvas)
-				bmp.asImageBitmap().also { _iconCache.put(packageName, it) }
-			}.getOrNull()
+			loadAndCacheIconSync(packageName)
 		}
+	}
+
+	private fun loadAndCacheIconSync(packageName: String): ImageBitmap? {
+		_iconCache.get(packageName)?.let { return it }
+		if (packageName.isEmpty() || packageName == "System DNS")
+			return null
+
+		val safeName = packageName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+		val diskFile = File(_iconCacheDir, "$safeName.png")
+		if (diskFile.exists()) {
+			val decoded = runCatching { BitmapFactory.decodeFile(diskFile.absolutePath)?.asImageBitmap() }.getOrNull()
+			if (decoded != null) {
+				_iconCache.put(packageName, decoded)
+				return decoded
+			}
+		}
+
+		return runCatching {
+			val d = _app.packageManager.getApplicationIcon(packageName)
+			val w = d.intrinsicWidth.coerceIn(48, 96)
+			val h = d.intrinsicHeight.coerceIn(48, 96)
+			val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+			val canvas = Canvas(bmp)
+			d.setBounds(0, 0, w, h)
+			d.draw(canvas)
+			runCatching {
+				FileOutputStream(diskFile).use { fos ->
+					bmp.compress(Bitmap.CompressFormat.PNG, 90, fos)
+				}
+			}
+			bmp.asImageBitmap().also { _iconCache.put(packageName, it) }
+		}.getOrNull()
 	}
 
 	fun toggleAppBypass(pkg: String) {

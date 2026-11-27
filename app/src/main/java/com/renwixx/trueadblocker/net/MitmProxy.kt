@@ -545,22 +545,29 @@ class MitmProxy(
 				}
 
 				val logTarget = if (effectivePath == "/" || effectivePath.isEmpty()) host else "$host${effectivePath.take(320)}"
-				if (verdict.isBlocked)
-					_onBlockedHit()
-
-				_traffic.push(
-					TrafficSample(
-						target = logTarget,
-						host = host,
-						proto = protoLabel,
-						isBlocked = verdict.isBlocked,
-						isRoute = effectivePath.length > 1 || rawPathAndQuery.length > 1,
-						appPkg = appPkg,
-						matchedRule = ruleInfo,
-					)
-				)
-
+				val isRouteTarget = effectivePath.length > 1 || rawPathAndQuery.length > 1
 				if (verdict.isBlocked) {
+					_onBlockedHit()
+					val (blkCat, blkExt) = classifyResponseType(
+						pathAndQuery = effectivePath,
+						contentTypeHeader = "",
+						contentDisposition = "",
+						secDest = req.header("sec-fetch-dest"),
+						acceptHeader = req.header("accept"),
+					)
+					_traffic.push(
+						TrafficSample(
+							target = logTarget,
+							host = host,
+							proto = protoLabel,
+							isBlocked = true,
+							isRoute = isRouteTarget,
+							appPkg = appPkg,
+							matchedRule = ruleInfo,
+							contentType = blkCat,
+							fileExt = blkExt,
+						)
+					)
 					if (isWs) {
 						writeNoopWebSocketTermination(req, clientOut)
 						break
@@ -698,7 +705,52 @@ class MitmProxy(
 					respHead = readHttpHeaderBlock(curUpIn)
 				}
 
-				val finalResp = respHead ?: break
+				val finalResp = respHead
+				if (finalResp == null) {
+					val (fallbackCat, fallbackExt) = classifyResponseType(
+						pathAndQuery = effectivePath,
+						contentTypeHeader = "",
+						contentDisposition = "",
+						secDest = req.header("sec-fetch-dest"),
+						acceptHeader = req.header("accept"),
+					)
+					_traffic.push(
+						TrafficSample(
+							target = logTarget,
+							host = host,
+							proto = protoLabel,
+							isBlocked = false,
+							isRoute = isRouteTarget,
+							appPkg = appPkg,
+							matchedRule = ruleInfo,
+							contentType = fallbackCat,
+							fileExt = fallbackExt,
+						)
+					)
+					break
+				}
+
+				val (respCat, respExt) = classifyResponseType(
+					pathAndQuery = effectivePath,
+					contentTypeHeader = finalResp.header("content-type"),
+					contentDisposition = finalResp.header("content-disposition"),
+					secDest = req.header("sec-fetch-dest"),
+					acceptHeader = req.header("accept"),
+				)
+				_traffic.push(
+					TrafficSample(
+						target = logTarget,
+						host = host,
+						proto = protoLabel,
+						isBlocked = false,
+						isRoute = isRouteTarget,
+						appPkg = appPkg,
+						matchedRule = ruleInfo,
+						contentType = respCat,
+						fileExt = respExt,
+					)
+				)
+
 				if (isWs && finalResp.statusCode == 101) {
 					clientOut.write(finalResp.rawBytes)
 					clientOut.flush()
@@ -845,6 +897,112 @@ class MitmProxy(
 		)
 
 		private const val WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+		private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "gif", "svg", "ico", "avif", "bmp", "heic", "heif")
+		private val VIDEO_EXTS = setOf("mp4", "webm", "m3u8", "ts", "mkv", "mov", "avi", "m4v", "flv", "3gp", "mpd")
+		private val AUDIO_EXTS = setOf("mp3", "ogg", "wav", "flac", "m4a", "aac", "opus", "weba", "wma", "mid")
+		private val FILE_EXTS = setOf(
+			"apk", "aab", "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "pdf", "doc", "docx",
+			"xls", "xlsx", "ppt", "pptx", "epub", "exe", "msi", "dmg", "iso", "bin", "deb", "rpm",
+			"wasm", "ttf", "otf", "woff", "woff2", "csv", "rtf",
+		)
+
+		fun classifyResponseType(
+			pathAndQuery: String,
+			contentTypeHeader: String,
+			contentDisposition: String = "",
+			secDest: String = "",
+			acceptHeader: String = "",
+		): Pair<String, String> {
+			val mime = contentTypeHeader.substringBefore(';').trim().lowercase()
+			val dispExt = extractDispositionExt(contentDisposition)
+			val pathExt = extractUrlExt(pathAndQuery)
+			val mimeExt = mimeToExt(mime)
+			val ext = dispExt.ifEmpty { pathExt }.ifEmpty { mimeExt }
+
+			val isAttachment = contentDisposition.contains("attachment", ignoreCase = true)
+			val category = when {
+				mime.startsWith("image/") -> "image"
+				mime.startsWith("video/") || mime == "application/vnd.apple.mpegurl" || mime == "application/dash+xml" -> "video"
+				mime.startsWith("audio/") -> "audio"
+				isAttachment || mime == "application/octet-stream" || mime == "application/pdf" ||
+					mime == "application/zip" || mime == "application/x-zip-compressed" ||
+					mime == "application/gzip" || mime == "application/x-7z-compressed" ||
+					mime == "application/x-rar-compressed" || mime == "application/vnd.android.package-archive" ||
+					mime.startsWith("font/") -> "file"
+				mime.startsWith("text/") || mime == "application/json" || mime == "application/javascript" ||
+					mime == "application/x-javascript" || mime == "application/xml" ||
+					mime.endsWith("+json") || mime.endsWith("+xml") || mime == "application/x-www-form-urlencoded" -> "default"
+				ext in IMAGE_EXTS -> "image"
+				ext in VIDEO_EXTS -> "video"
+				ext in AUDIO_EXTS -> "audio"
+				ext in FILE_EXTS -> "file"
+				secDest.equals("image", ignoreCase = true) -> "image"
+				secDest.equals("video", ignoreCase = true) -> "video"
+				secDest.equals("audio", ignoreCase = true) -> "audio"
+				acceptHeader.startsWith("image/", ignoreCase = true) && !acceptHeader.contains("text/html", ignoreCase = true) -> "image"
+				else -> "default"
+			}
+
+			return category to ext
+		}
+
+		private fun extractDispositionExt(cd: String): String {
+			if (cd.isEmpty())
+				return ""
+			val idx = cd.indexOf("filename=", ignoreCase = true)
+			if (idx < 0)
+				return ""
+			val raw = cd.substring(idx + 9).trim().substringBefore(';').trim('"', '\'', ' ')
+			val dot = raw.lastIndexOf('.')
+			if (dot < 0 || dot >= raw.lastIndex)
+				return ""
+			val candidate = raw.substring(dot + 1).lowercase()
+
+			return if (candidate.length in 1..8 && candidate.all { it.isLetterOrDigit() }) candidate else ""
+		}
+
+		private fun extractUrlExt(pathAndQuery: String): String {
+			val cleanPath = pathAndQuery.substringBefore('?').substringBefore('#')
+			val lastSeg = cleanPath.substringAfterLast('/')
+			val dot = lastSeg.lastIndexOf('.')
+			if (dot <= 0 || dot >= lastSeg.lastIndex)
+				return ""
+			val candidate = lastSeg.substring(dot + 1).lowercase()
+
+			return if (candidate.length in 1..8 && candidate.all { it.isLetterOrDigit() }) candidate else ""
+		}
+
+		private fun mimeToExt(mime: String): String {
+			return when (mime) {
+				"image/png" -> "png"
+				"image/jpeg" -> "jpg"
+				"image/webp" -> "webp"
+				"image/gif" -> "gif"
+				"image/svg+xml" -> "svg"
+				"image/avif" -> "avif"
+				"image/x-icon", "image/vnd.microsoft.icon" -> "ico"
+				"video/mp4" -> "mp4"
+				"video/webm" -> "webm"
+				"video/mp2t" -> "ts"
+				"application/vnd.apple.mpegurl" -> "m3u8"
+				"audio/mpeg" -> "mp3"
+				"audio/ogg" -> "ogg"
+				"audio/wav", "audio/x-wav" -> "wav"
+				"audio/aac" -> "aac"
+				"audio/mp4" -> "m4a"
+				"audio/flac" -> "flac"
+				"application/pdf" -> "pdf"
+				"application/zip", "application/x-zip-compressed" -> "zip"
+				"application/gzip" -> "gz"
+				"application/vnd.android.package-archive" -> "apk"
+				"application/wasm" -> "wasm"
+				"font/woff2" -> "woff2"
+				"font/woff" -> "woff"
+				"font/ttf" -> "ttf"
+				else -> ""
+			}
+		}
 
 		private fun detectIsThirdParty(req: ParsedHttpHead, reqHost: String): Boolean? {
 			val secSite = req.header("sec-fetch-site").trim().lowercase()

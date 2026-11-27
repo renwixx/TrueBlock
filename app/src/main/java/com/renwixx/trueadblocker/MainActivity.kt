@@ -12,10 +12,18 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,6 +47,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -67,6 +76,11 @@ import com.renwixx.trueadblocker.ui.theme.TrueAdBlockerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+private data class NavDestination(
+	val tab: Int,
+	val advancedSub: AdvancedSubScreen = AdvancedSubScreen.HUB,
+)
+
 class MainActivity : ComponentActivity() {
 	override fun onCreate(savedInstanceState: Bundle?) {
 		enableEdgeToEdge(
@@ -84,9 +98,42 @@ class MainActivity : ComponentActivity() {
 
 			var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 			var advancedSub by rememberSaveable { mutableStateOf(AdvancedSubScreen.HUB) }
+			val navHistory = remember { mutableStateListOf<NavDestination>() }
+			var isBackTransition by remember { mutableStateOf(false) }
 			var isPendingVpnStart by remember { mutableStateOf(false) }
 			var isExportDialogOpen by remember { mutableStateOf(false) }
 			var pendingExportSections by remember { mutableStateOf(BackupSections()) }
+
+			fun navigateTo(
+				targetTab: Int,
+				targetSub: AdvancedSubScreen = if (targetTab == 3) AdvancedSubScreen.HUB else advancedSub,
+			) {
+				if (targetTab == selectedTab && (targetTab != 3 || targetSub == advancedSub))
+					return
+				navHistory.add(NavDestination(selectedTab, advancedSub))
+				if (navHistory.size > 20)
+					navHistory.removeAt(0)
+				isBackTransition = false
+				selectedTab = targetTab
+				if (targetTab == 3)
+					advancedSub = targetSub
+			}
+
+			fun navigateBack() {
+				if (navHistory.isNotEmpty()) {
+					val prev = navHistory.removeAt(navHistory.lastIndex)
+					isBackTransition = true
+					selectedTab = prev.tab
+					advancedSub = prev.advancedSub
+				} else if (selectedTab == 3 && advancedSub != AdvancedSubScreen.HUB) {
+					isBackTransition = true
+					advancedSub = AdvancedSubScreen.HUB
+				}
+			}
+
+			BackHandler(enabled = navHistory.isNotEmpty() || (selectedTab == 3 && advancedSub != AdvancedSubScreen.HUB)) {
+				navigateBack()
+			}
 
 			LaunchedEffect(vm) {
 				vm.toastEvents.collect { msg ->
@@ -240,35 +287,35 @@ class MainActivity : ComponentActivity() {
 
 								NavigationBarItem(
 									selected = selectedTab == 0,
-									onClick = { selectedTab = 0 },
+									onClick = { navigateTo(0) },
 									icon = { Icon(Icons.Default.Shield, contentDescription = "Home") },
 									label = { Text("Home", fontSize = 11.sp, maxLines = 1) },
 									colors = navColors,
 								)
 								NavigationBarItem(
 									selected = selectedTab == 1,
-									onClick = { selectedTab = 1 },
+									onClick = { navigateTo(1) },
 									icon = { Icon(Icons.Default.BarChart, contentDescription = "Activity") },
 									label = { Text("Activity", fontSize = 11.sp, maxLines = 1) },
 									colors = navColors,
 								)
 								NavigationBarItem(
 									selected = selectedTab == 2,
-									onClick = { selectedTab = 2 },
+									onClick = { navigateTo(2) },
 									icon = { Icon(Icons.Default.PieChart, contentDescription = "Analytics") },
 									label = { Text("Analytics", fontSize = 11.sp, maxLines = 1) },
 									colors = navColors,
 								)
 								NavigationBarItem(
 									selected = selectedTab == 3,
-									onClick = { selectedTab = 3 },
+									onClick = { navigateTo(3, AdvancedSubScreen.HUB) },
 									icon = { Icon(Icons.Default.Tune, contentDescription = "Advanced") },
 									label = { Text("Advanced", fontSize = 11.sp, maxLines = 1) },
 									colors = navColors,
 								)
 								NavigationBarItem(
 									selected = selectedTab == 4,
-									onClick = { selectedTab = 4 },
+									onClick = { navigateTo(4) },
 									icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
 									label = { Text("Settings", fontSize = 11.sp, maxLines = 1) },
 									colors = navColors,
@@ -277,56 +324,64 @@ class MainActivity : ComponentActivity() {
 						}
 					},
 				) { innerPadding ->
+					val currentDest = NavDestination(selectedTab, if (selectedTab == 3) advancedSub else AdvancedSubScreen.HUB)
 					Box(
 						modifier = Modifier
 							.fillMaxSize()
 							.padding(innerPadding),
 					) {
-						when (selectedTab) {
-							0 -> HomeScreen(
-								vm = vm,
-								onToggleVpn = { handleToggleVpn() },
-								onOpenHttpsSetup = {
-									advancedSub = AdvancedSubScreen.HTTPS_SETUP
-									selectedTab = 3
-								},
-								onOpenActivity = { selectedTab = 1 },
-								onOpenSettings = { selectedTab = 4 },
-								onOpenEngineConfig = {
-									advancedSub = AdvancedSubScreen.ENGINE_CONFIG
-									selectedTab = 3
-								},
-							)
-							1 -> ActivityScreen(vm = vm)
-							2 -> AnalyticsScreen(vm = vm)
-							3 -> AdvancedScreen(
-								vm = vm,
-								currentSub = advancedSub,
-								onNavigateSub = { advancedSub = it },
-								onSaveCaFile = {
-									saveCaLauncher.launch("TrueBlock-Root-CA.crt")
-								},
-								onOpenSystemSecuritySettings = {
-									val isOpened = runCatching {
-										startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS))
-										true
-									}.getOrDefault(false)
-									if (!isOpened)
-										runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
-								},
-								onImportLocalFilterTxt = {
-									importTxtListLauncher.launch(arrayOf("text/*", "application/octet-stream", "*/*"))
-								},
-							)
-							4 -> SettingsScreen(
-								vm = vm,
-								onExportBackup = { isExportDialogOpen = true },
-								onImportBackup = { importBackupLauncher.launch(arrayOf("application/json", "text/*", "*/*")) },
-								onOpenEngineConfig = {
-									advancedSub = AdvancedSubScreen.ENGINE_CONFIG
-									selectedTab = 3
-								},
-							)
+						AnimatedContent(
+							targetState = currentDest,
+							transitionSpec = {
+								val isSubSlide = targetState.tab == 3 && initialState.tab == 3 && targetState.advancedSub != initialState.advancedSub
+								if (isSubSlide) {
+									val dir = if (isBackTransition || targetState.advancedSub == AdvancedSubScreen.HUB) -1 else 1
+									(slideInHorizontally(tween(200)) { it / 6 * dir } + fadeIn(tween(180)))
+										.togetherWith(slideOutHorizontally(tween(160)) { -it / 8 * dir } + fadeOut(tween(140)))
+								} else {
+									fadeIn(tween(170)).togetherWith(fadeOut(tween(120)))
+								}
+							},
+							label = "main_nav_transition",
+						) { dest ->
+							when (dest.tab) {
+								0 -> HomeScreen(
+									vm = vm,
+									onToggleVpn = { handleToggleVpn() },
+									onOpenHttpsSetup = { navigateTo(3, AdvancedSubScreen.HTTPS_SETUP) },
+									onOpenActivity = { navigateTo(1) },
+									onOpenSettings = { navigateTo(4) },
+									onOpenEngineConfig = { navigateTo(3, AdvancedSubScreen.ENGINE_CONFIG) },
+								)
+								1 -> ActivityScreen(vm = vm)
+								2 -> AnalyticsScreen(vm = vm)
+								3 -> AdvancedScreen(
+									vm = vm,
+									currentSub = dest.advancedSub,
+									onNavigateSub = { nextSub -> navigateTo(3, nextSub) },
+									onBack = { navigateBack() },
+									onSaveCaFile = {
+										saveCaLauncher.launch("TrueBlock-Root-CA.crt")
+									},
+									onOpenSystemSecuritySettings = {
+										val isOpened = runCatching {
+											startActivity(Intent(Settings.ACTION_SECURITY_SETTINGS))
+											true
+										}.getOrDefault(false)
+										if (!isOpened)
+											runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+									},
+									onImportLocalFilterTxt = {
+										importTxtListLauncher.launch(arrayOf("text/*", "application/octet-stream", "*/*"))
+									},
+								)
+								4 -> SettingsScreen(
+									vm = vm,
+									onExportBackup = { isExportDialogOpen = true },
+									onImportBackup = { importBackupLauncher.launch(arrayOf("application/json", "text/*", "*/*")) },
+									onOpenEngineConfig = { navigateTo(3, AdvancedSubScreen.ENGINE_CONFIG) },
+								)
+							}
 						}
 					}
 				}

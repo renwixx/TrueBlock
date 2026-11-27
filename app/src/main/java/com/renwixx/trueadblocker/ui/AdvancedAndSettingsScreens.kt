@@ -1,6 +1,6 @@
 package com.renwixx.trueadblocker.ui
 
-import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -127,51 +128,78 @@ enum class AdvancedSubScreen {
 }
 
 @Composable
+fun ScreenHeader(
+	title: String,
+	onBack: (() -> Unit)? = null,
+	actions: @Composable RowScope.() -> Unit = {},
+) {
+	Row(
+		verticalAlignment = Alignment.CenterVertically,
+		modifier = Modifier
+			.fillMaxWidth()
+			.height(56.dp)
+			.padding(start = if (onBack != null) 4.dp else 16.dp, end = 8.dp),
+	) {
+		if (onBack != null) {
+			IconButton(onClick = onBack) {
+				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+			}
+		}
+		Text(
+			text = title,
+			fontSize = 22.sp,
+			fontWeight = FontWeight.Bold,
+			maxLines = 1,
+			overflow = TextOverflow.Ellipsis,
+			modifier = Modifier.weight(1f),
+		)
+		actions()
+	}
+}
+
+@Composable
 fun AdvancedScreen(
 	vm: MainViewModel,
 	currentSub: AdvancedSubScreen,
 	onNavigateSub: (AdvancedSubScreen) -> Unit,
+	onBack: () -> Unit,
 	onSaveCaFile: () -> Unit,
 	onOpenSystemSecuritySettings: () -> Unit,
 	onImportLocalFilterTxt: () -> Unit,
 ) {
-	if (currentSub != AdvancedSubScreen.HUB) {
-		BackHandler { onNavigateSub(AdvancedSubScreen.HUB) }
-	}
-
 	when (currentSub) {
 		AdvancedSubScreen.HUB -> AdvancedHubView(vm, onNavigateSub)
 		AdvancedSubScreen.CUSTOM_RULES -> CustomRulesSubView(
 			vm = vm,
-			onBack = { onNavigateSub(AdvancedSubScreen.HUB) },
+			onBack = onBack,
 		)
 		AdvancedSubScreen.BLOCKLISTS -> BlocklistsSubView(
 			vm = vm,
-			onBack = { onNavigateSub(AdvancedSubScreen.HUB) },
+			onBack = onBack,
 			onImportLocalTxt = onImportLocalFilterTxt,
 		)
 		AdvancedSubScreen.HTTPS_SETUP -> HttpsSetupSubView(
 			vm = vm,
-			onBack = { onNavigateSub(AdvancedSubScreen.HUB) },
+			onBack = onBack,
 			onSaveCaFile = onSaveCaFile,
 			onOpenSystemSecuritySettings = onOpenSystemSecuritySettings,
 		)
 		AdvancedSubScreen.PROXIES -> ProxiesSubView(
 			vm = vm,
-			onBack = { onNavigateSub(AdvancedSubScreen.HUB) },
+			onBack = onBack,
 		)
 		AdvancedSubScreen.APPS -> AppsSubView(
 			vm = vm,
-			onBack = { onNavigateSub(AdvancedSubScreen.HUB) },
+			onBack = onBack,
 			onOpenProxies = { onNavigateSub(AdvancedSubScreen.PROXIES) },
 		)
 		AdvancedSubScreen.NETWORKS -> NetworksSubView(
 			vm = vm,
-			onBack = { onNavigateSub(AdvancedSubScreen.HUB) },
+			onBack = onBack,
 		)
 		AdvancedSubScreen.ENGINE_CONFIG -> EngineConfigSubView(
 			vm = vm,
-			onBack = { onNavigateSub(AdvancedSubScreen.HUB) },
+			onBack = onBack,
 		)
 	}
 }
@@ -203,14 +231,14 @@ private fun AdvancedHubView(
 	}
 	val enabledProxies = cfg.proxies.count { it.isEnabled }
 
-	Column(
-		modifier = Modifier
-			.fillMaxSize()
-			.verticalScroll(rememberScrollState())
-			.padding(horizontal = 16.dp, vertical = 12.dp),
-	) {
-		Text("Advanced", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-		Spacer(Modifier.height(14.dp))
+	Column(modifier = Modifier.fillMaxSize()) {
+		ScreenHeader(title = "Advanced")
+		Column(
+			modifier = Modifier
+				.fillMaxSize()
+				.verticalScroll(rememberScrollState())
+				.padding(horizontal = 16.dp, vertical = 4.dp),
+		) {
 
 		HubCardRow(
 			icon = Icons.Default.Edit,
@@ -265,6 +293,8 @@ private fun AdvancedHubView(
 			subtitle = "Edit MTU, VPN IPs, L3 capture, CNAME, \$removeparam, Cosmetic CSS & timeouts on the fly",
 			onClick = { onSelect(AdvancedSubScreen.ENGINE_CONFIG) },
 		)
+			Spacer(Modifier.height(12.dp))
+		}
 	}
 }
 
@@ -350,14 +380,10 @@ private fun BlocklistsSubView(
 	}
 
 	Column(modifier = Modifier.fillMaxSize()) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+		ScreenHeader(
+			title = "Blocklists",
+			onBack = onBack,
 		) {
-			IconButton(onClick = onBack) {
-				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-			}
-			Text("Blocklists", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
 			IconButton(onClick = { isAddDialogOpen = true }) {
 				Icon(Icons.Default.Link, contentDescription = "Add Direct URL")
 			}
@@ -820,14 +846,10 @@ private fun CustomRulesSubView(
 				.fillMaxSize()
 				.padding(innerPad),
 		) {
-			Row(
-				verticalAlignment = Alignment.CenterVertically,
-				modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+			ScreenHeader(
+				title = "Custom Rules",
+				onBack = onBack,
 			) {
-				IconButton(onClick = onBack) {
-					Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-				}
-				Text("Custom Rules Editor", fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
 				IconButton(onClick = { isCreatingNew = true }) {
 					Icon(Icons.Default.Add, contentDescription = "New Rule")
 				}
@@ -1024,22 +1046,14 @@ private fun HttpsSetupSubView(
 		onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
 	}
 
-	Column(
-		modifier = Modifier
-			.fillMaxSize()
-			.verticalScroll(rememberScrollState()),
-	) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+	Column(modifier = Modifier.fillMaxSize()) {
+		ScreenHeader(title = "HTTPS & Route Filtering", onBack = onBack)
+		Column(
+			modifier = Modifier
+				.fillMaxSize()
+				.verticalScroll(rememberScrollState())
+				.padding(horizontal = 16.dp, vertical = 8.dp),
 		) {
-			IconButton(onClick = onBack) {
-				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-			}
-			Text("HTTPS & Route Filtering", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-		}
-
-		Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
 			SettingSwitchCard(
 				title = "Enable HTTPS & URL Route Filtering",
 				subtitle = "Decrypts HTTPS for selected browser apps to block routes (e.g. xxx.com/ad) with uBlock noop stubs & WebSocket termination",
@@ -1230,14 +1244,10 @@ private fun AppsSubView(
 	}
 
 	Column(modifier = Modifier.fillMaxSize()) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+		ScreenHeader(
+			title = "Apps & Firewall",
+			onBack = onBack,
 		) {
-			IconButton(onClick = onBack) {
-				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-			}
-			Text("Apps & Firewall", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
 			TextButton(onClick = onOpenProxies) {
 				Text("Proxies", fontSize = 12.5.sp)
 			}
@@ -1309,8 +1319,10 @@ private fun AppsSubView(
 					val isFwWifi = cfg.firewallWifiApps.contains(appItem.packageName)
 					val isFwMob = cfg.firewallMobileApps.contains(appItem.packageName)
 					val isProxied = proxiedAppSet.contains(appItem.packageName)
-					val iconBmp by produceState<ImageBitmap?>(initialValue = null, key1 = appItem.packageName) {
-						value = vm.getAppIcon(appItem.packageName)
+					val cachedBmp = remember(appItem.packageName) { vm.getCachedAppIcon(appItem.packageName) }
+					val iconBmp by produceState(initialValue = cachedBmp, key1 = appItem.packageName) {
+						if (value == null)
+							value = vm.getAppIcon(appItem.packageName)
 					}
 
 					Column(
@@ -1426,22 +1438,14 @@ private fun NetworksSubView(
 	val cfg by vm.config.collectAsState()
 	val accent = MaterialTheme.colorScheme.primary
 
-	Column(
-		modifier = Modifier
-			.fillMaxSize()
-			.verticalScroll(rememberScrollState()),
-	) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+	Column(modifier = Modifier.fillMaxSize()) {
+		ScreenHeader(title = "Networks & DNS", onBack = onBack)
+		Column(
+			modifier = Modifier
+				.fillMaxSize()
+				.verticalScroll(rememberScrollState())
+				.padding(horizontal = 16.dp, vertical = 8.dp),
 		) {
-			IconButton(onClick = onBack) {
-				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-			}
-			Text("Networks & DNS", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-		}
-
-		Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
 			Text("Upstream DNS Provider", fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = accent)
 			Spacer(Modifier.height(8.dp))
 
@@ -1490,31 +1494,33 @@ private fun NetworksSubView(
 				Text("Custom Upstream DNS / DoH", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
 			}
 
-			if (cfg.dnsPresetKey == "custom") {
-				Spacer(Modifier.height(8.dp))
-				OutlinedTextField(
-					value = cfg.customDnsIp,
-					onValueChange = { ip -> vm.prefs.update { it.copy(customDnsIp = ip) } },
-					label = { Text("Primary DNS IPv4 (e.g. 9.9.9.9)") },
-					singleLine = true,
-					modifier = Modifier.fillMaxWidth(),
-				)
-				Spacer(Modifier.height(8.dp))
-				OutlinedTextField(
-					value = cfg.customSecondaryDnsIp,
-					onValueChange = { ip -> vm.prefs.update { it.copy(customSecondaryDnsIp = ip) } },
-					label = { Text("Secondary DNS IPv4 (optional — leave blank for none)") },
-					singleLine = true,
-					modifier = Modifier.fillMaxWidth(),
-				)
-				Spacer(Modifier.height(8.dp))
-				OutlinedTextField(
-					value = cfg.customDohUrl,
-					onValueChange = { u -> vm.prefs.update { it.copy(customDohUrl = u) } },
-					label = { Text("Custom DoH Endpoint (https://.../dns-query)") },
-					singleLine = true,
-					modifier = Modifier.fillMaxWidth(),
-				)
+			AnimatedVisibility(visible = cfg.dnsPresetKey == "custom") {
+				Column {
+					Spacer(Modifier.height(8.dp))
+					OutlinedTextField(
+						value = cfg.customDnsIp,
+						onValueChange = { ip -> vm.prefs.update { it.copy(customDnsIp = ip) } },
+						label = { Text("Primary DNS IPv4 (e.g. 9.9.9.9)") },
+						singleLine = true,
+						modifier = Modifier.fillMaxWidth(),
+					)
+					Spacer(Modifier.height(8.dp))
+					OutlinedTextField(
+						value = cfg.customSecondaryDnsIp,
+						onValueChange = { ip -> vm.prefs.update { it.copy(customSecondaryDnsIp = ip) } },
+						label = { Text("Secondary DNS IPv4 (optional — leave blank for none)") },
+						singleLine = true,
+						modifier = Modifier.fillMaxWidth(),
+					)
+					Spacer(Modifier.height(8.dp))
+					OutlinedTextField(
+						value = cfg.customDohUrl,
+						onValueChange = { u -> vm.prefs.update { it.copy(customDohUrl = u) } },
+						label = { Text("Custom DoH Endpoint (https://.../dns-query)") },
+						singleLine = true,
+						modifier = Modifier.fillMaxWidth(),
+					)
+				}
 			}
 
 			Spacer(Modifier.height(10.dp))
@@ -1528,14 +1534,16 @@ private fun NetworksSubView(
 			val isAnyDohActive = cfg.isUseDoh ||
 				(cfg.isWifiCustomOverride && cfg.isWifiUseDoh) ||
 				(cfg.isMobileCustomOverride && cfg.isMobileUseDoh)
-			if (isAnyDohActive) {
-				Spacer(Modifier.height(6.dp))
-				SettingSwitchCard(
-					title = "Strict DoH Mode (Never Fall Back to Plain DNS)",
-					subtitle = "Blocks unencrypted port 53 fallback if DoH is unreachable. Keep off if captive portals fail to load.",
-					isChecked = cfg.isStrictDoh,
-					onToggle = { v -> vm.prefs.update { it.copy(isStrictDoh = v) } },
-				)
+			AnimatedVisibility(visible = isAnyDohActive) {
+				Column {
+					Spacer(Modifier.height(6.dp))
+					SettingSwitchCard(
+						title = "Strict DoH Mode (Never Fall Back to Plain DNS)",
+						subtitle = "Blocks unencrypted port 53 fallback if DoH is unreachable. Keep off if captive portals fail to load.",
+						isChecked = cfg.isStrictDoh,
+						onToggle = { v -> vm.prefs.update { it.copy(isStrictDoh = v) } },
+					)
+				}
 			}
 
 			Spacer(Modifier.height(18.dp))
@@ -1660,17 +1668,16 @@ fun SettingsScreen(
 
 	var isColorPickerOpen by remember { mutableStateOf(false) }
 
-	Column(
-		modifier = Modifier
-			.fillMaxSize()
-			.verticalScroll(rememberScrollState())
-			.padding(horizontal = 16.dp, vertical = 12.dp),
-	) {
-		Text("Settings", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-		Spacer(Modifier.height(16.dp))
-
-		Text("Appearance", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = accent)
-		Spacer(Modifier.height(8.dp))
+	Column(modifier = Modifier.fillMaxSize()) {
+		ScreenHeader(title = "Settings")
+		Column(
+			modifier = Modifier
+				.fillMaxSize()
+				.verticalScroll(rememberScrollState())
+				.padding(horizontal = 16.dp, vertical = 4.dp),
+		) {
+			Text("Appearance", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = accent)
+			Spacer(Modifier.height(8.dp))
 
 		Row(
 			verticalAlignment = Alignment.CenterVertically,
@@ -1844,6 +1851,7 @@ fun SettingsScreen(
 		}
 
 		Spacer(Modifier.height(24.dp))
+		}
 	}
 
 	if (isColorPickerOpen) {

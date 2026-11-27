@@ -3,22 +3,33 @@ package com.renwixx.trueadblocker.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,19 +40,27 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,10 +76,12 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -68,6 +89,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -82,6 +104,7 @@ import androidx.compose.ui.unit.sp
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.renwixx.trueadblocker.data.AggregatedLog
 import com.renwixx.trueadblocker.data.CustomRule
+import com.renwixx.trueadblocker.data.HttpsDomainGroup
 import com.renwixx.trueadblocker.data.RawLog
 import com.renwixx.trueadblocker.ui.theme.ShieldGreen
 import com.renwixx.trueadblocker.ui.theme.ShieldRed
@@ -276,14 +299,20 @@ fun HomeScreen(
 				}
 			}
 
-			Icon(
-				imageVector = Icons.Default.PowerSettingsNew,
-				contentDescription = "Toggle Protection",
-				tint = when {
+			val powerIconTint by animateColorAsState(
+				targetValue = when {
 					isActive -> accent
 					vpn.isSnoozed -> ShieldRed
 					else -> MaterialTheme.colorScheme.onSurfaceVariant
 				},
+				animationSpec = tween(250),
+				label = "power_tint",
+			)
+
+			Icon(
+				imageVector = Icons.Default.PowerSettingsNew,
+				contentDescription = "Toggle Protection",
+				tint = powerIconTint,
 				modifier = Modifier.size(64.dp),
 			)
 		}
@@ -354,42 +383,44 @@ fun HomeScreen(
 				StatPill(text = if (vpn.isL3CaptureActive) "${vpn.activeTransport} • L3" else vpn.activeTransport)
 		}
 
-		if (vpn.isRunning) {
-			Spacer(Modifier.height(10.dp))
-			if (vpn.isSnoozed) {
-				Row(
-					verticalAlignment = Alignment.CenterVertically,
-					horizontalArrangement = Arrangement.spacedBy(10.dp),
-					modifier = Modifier
-						.clip(RoundedCornerShape(20.dp))
-						.background(ShieldRed.copy(alpha = 0.16f))
-						.border(1.dp, ShieldRed.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
-						.clickable { vm.resumeProtection() }
-						.padding(horizontal = 14.dp, vertical = 6.dp),
-				) {
-					Text(
-						text = "Protection Snoozed — Tap to Resume Now",
-						fontSize = 12.sp,
-						fontWeight = FontWeight.SemiBold,
-						color = ShieldRed,
-					)
-				}
-			} else {
-				Row(
-					verticalAlignment = Alignment.CenterVertically,
-					horizontalArrangement = Arrangement.spacedBy(8.dp),
-				) {
-					Text("Snooze:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-					for (mins in listOf(1, 5, 15)) {
-						Box(
-							modifier = Modifier
-								.clip(RoundedCornerShape(16.dp))
-								.background(MaterialTheme.colorScheme.surface)
-								.border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
-								.clickable { vm.snoozeProtection(mins) }
-								.padding(horizontal = 11.dp, vertical = 4.dp),
-						) {
-							Text("${mins}m", fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = accent)
+		AnimatedVisibility(visible = vpn.isRunning) {
+			Column(horizontalAlignment = Alignment.CenterHorizontally) {
+				Spacer(Modifier.height(10.dp))
+				if (vpn.isSnoozed) {
+					Row(
+						verticalAlignment = Alignment.CenterVertically,
+						horizontalArrangement = Arrangement.spacedBy(10.dp),
+						modifier = Modifier
+							.clip(RoundedCornerShape(20.dp))
+							.background(ShieldRed.copy(alpha = 0.16f))
+							.border(1.dp, ShieldRed.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+							.clickable { vm.resumeProtection() }
+							.padding(horizontal = 14.dp, vertical = 6.dp),
+					) {
+						Text(
+							text = "Protection Snoozed — Tap to Resume Now",
+							fontSize = 12.sp,
+							fontWeight = FontWeight.SemiBold,
+							color = ShieldRed,
+						)
+					}
+				} else {
+					Row(
+						verticalAlignment = Alignment.CenterVertically,
+						horizontalArrangement = Arrangement.spacedBy(8.dp),
+					) {
+						Text("Snooze:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+						for (mins in listOf(1, 5, 15)) {
+							Box(
+								modifier = Modifier
+									.clip(RoundedCornerShape(16.dp))
+									.background(MaterialTheme.colorScheme.surface)
+									.border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
+									.clickable { vm.snoozeProtection(mins) }
+									.padding(horizontal = 11.dp, vertical = 4.dp),
+							) {
+								Text("${mins}m", fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = accent)
+							}
 						}
 					}
 				}
@@ -472,7 +503,49 @@ data class InspectedEntry(
 	val appPkg: String,
 	val matchedRule: String,
 	val proto: String,
+	val contentType: String = "",
+	val fileExt: String = "",
 )
+
+fun shortenUrlForDisplay(target: String): String {
+	val slashIdx = target.indexOf('/')
+	if (slashIdx < 0)
+		return target
+
+	val host = target.substring(0, slashIdx)
+	val rest = target.substring(slashIdx)
+	val qIdx = rest.indexOf('?')
+	val pathOnly = if (qIdx >= 0) rest.substring(0, qIdx) else rest
+	val hasQuery = qIdx >= 0
+
+	val segs = pathOnly.split('/').filter { it.isNotEmpty() }
+	val compactPath = when {
+		segs.isEmpty() -> "/"
+		segs.size <= 2 && pathOnly.length <= 42 -> pathOnly
+		segs.size == 1 -> "/${segs[0].take(28)}…"
+		else -> {
+			val first = segs.first().take(16)
+			val last = segs.last().take(24)
+			if (segs.size > 2) "/$first/…/$last" else "/$first/$last"
+		}
+	}
+
+	return if (hasQuery) "$host$compactPath?…" else "$host$compactPath"
+}
+
+private fun formatResponseTypeBadge(contentType: String, fileExt: String): String {
+	if (fileExt.isNotEmpty() && contentType == "file")
+		return ".${fileExt.uppercase()}"
+
+	return when (contentType) {
+		"image" -> if (fileExt.isNotEmpty()) "IMG.${fileExt.uppercase()}" else "IMG"
+		"video" -> if (fileExt.isNotEmpty()) "VID.${fileExt.uppercase()}" else "VID"
+		"audio" -> if (fileExt.isNotEmpty()) "AUD.${fileExt.uppercase()}" else "AUD"
+		"file" -> "FILE"
+		"default" -> "TEXT/API"
+		else -> ""
+	}
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -480,7 +553,10 @@ fun ActivityScreen(vm: MainViewModel) {
 	val filter by vm.activityFilter.collectAsState()
 	val rulesRev by vm.rulesRevision.collectAsState()
 	val labelRev by vm.labelRevision.collectAsState()
+	val loggedApps by vm.loggedApps.collectAsState()
+	val installedApps by vm.installedApps.collectAsState()
 	val aggItems = vm.pagedAggregated.collectAsLazyPagingItems()
+	val domainItems = vm.pagedHttpsDomains.collectAsLazyPagingItems()
 	val rawItems = vm.pagedRaw.collectAsLazyPagingItems()
 	val accent = MaterialTheme.colorScheme.primary
 	val ctx = LocalContext.current
@@ -496,32 +572,31 @@ fun ActivityScreen(vm: MainViewModel) {
 
 	var isSearchVisible by remember { mutableStateOf(filter.query.isNotEmpty()) }
 	var isFilterMenuOpen by remember { mutableStateOf(false) }
+	var isAppFilterDialogOpen by remember { mutableStateOf(false) }
+	var isTypeFilterDialogOpen by remember { mutableStateOf(false) }
 	var selectedEntry by remember { mutableStateOf<InspectedEntry?>(null) }
 	var ruleEditorTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
 
 	val isShowingRawList = filter.viewMode == ACTIVITY_MODE_LIVE_RAW ||
 		(filter.viewMode == ACTIVITY_MODE_HTTPS_URLS && filter.isHttpsLiveStream)
+	val isShowingHttpsDomainList = filter.viewMode == ACTIVITY_MODE_HTTPS_URLS &&
+		!isShowingRawList &&
+		filter.isGroupHttpsByDomain &&
+		filter.selectedHttpsDomain.isEmpty()
+
+	BackHandler(enabled = filter.viewMode == ACTIVITY_MODE_HTTPS_URLS && filter.selectedHttpsDomain.isNotEmpty()) {
+		vm.updateActivityFilter { it.copy(selectedHttpsDomain = "") }
+	}
 
 	Column(modifier = Modifier.fillMaxSize()) {
-		Row(
-			verticalAlignment = Alignment.CenterVertically,
-			modifier = Modifier
-				.fillMaxWidth()
-				.padding(horizontal = 16.dp, vertical = 6.dp),
-		) {
-			Text(
-				text = "Activity",
-				fontSize = 21.sp,
-				fontWeight = FontWeight.Bold,
-				modifier = Modifier.weight(1f),
-			)
-
+		ScreenHeader(title = "Activity") {
 			if (filter.viewMode == ACTIVITY_MODE_HTTPS_URLS) {
 				FilterChip(
 					selected = filter.isHttpsLiveStream,
 					onClick = { vm.updateActivityFilter { it.copy(isHttpsLiveStream = !it.isHttpsLiveStream) } },
-					label = { Text(if (filter.isHttpsLiveStream) "Live Stream" else "Grouped URLs", fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
+					label = { Text(if (filter.isHttpsLiveStream) "Live" else "Grouped", fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
 				)
+				Spacer(Modifier.width(2.dp))
 			}
 
 			IconButton(onClick = {
@@ -586,7 +661,7 @@ fun ActivityScreen(vm: MainViewModel) {
 		) {
 			Tab(
 				selected = filter.viewMode == ACTIVITY_MODE_GROUPED,
-				onClick = { vm.updateActivityFilter { it.copy(viewMode = ACTIVITY_MODE_GROUPED) } },
+				onClick = { vm.updateActivityFilter { it.copy(viewMode = ACTIVITY_MODE_GROUPED, selectedHttpsDomain = "") } },
 				text = { Text("GROUPED", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) },
 			)
 			Tab(
@@ -596,12 +671,12 @@ fun ActivityScreen(vm: MainViewModel) {
 			)
 			Tab(
 				selected = filter.viewMode == ACTIVITY_MODE_LIVE_RAW,
-				onClick = { vm.updateActivityFilter { it.copy(viewMode = ACTIVITY_MODE_LIVE_RAW) } },
+				onClick = { vm.updateActivityFilter { it.copy(viewMode = ACTIVITY_MODE_LIVE_RAW, selectedHttpsDomain = "") } },
 				text = { Text("LIVE RAW", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) },
 			)
 		}
 
-		if (isSearchVisible) {
+		AnimatedVisibility(visible = isSearchVisible) {
 			OutlinedTextField(
 				value = filter.query,
 				onValueChange = { q -> vm.updateActivityFilter { it.copy(query = q) } },
@@ -620,125 +695,297 @@ fun ActivityScreen(vm: MainViewModel) {
 			)
 		}
 
-		if (!isShowingRawList) {
-			Row(
-				horizontalArrangement = Arrangement.spacedBy(8.dp),
-				verticalAlignment = Alignment.CenterVertically,
-				modifier = Modifier
-					.fillMaxWidth()
-					.padding(horizontal = 14.dp, vertical = 4.dp),
-			) {
+		Row(
+			horizontalArrangement = Arrangement.spacedBy(8.dp),
+			verticalAlignment = Alignment.CenterVertically,
+			modifier = Modifier
+				.fillMaxWidth()
+				.horizontalScroll(rememberScrollState())
+				.padding(horizontal = 14.dp, vertical = 4.dp),
+		) {
+			val activeAppLabel = remember(filter.appPkgFilter, labelRev) {
+				if (filter.appPkgFilter.isEmpty()) {
+					"All Apps"
+				} else {
+					vm.appLabelFast(filter.appPkgFilter).substringBefore(" (")
+				}
+			}
+			FilterChip(
+				selected = filter.appPkgFilter.isNotEmpty(),
+				onClick = { isAppFilterDialogOpen = true },
+				leadingIcon = { Icon(Icons.Default.Apps, contentDescription = null, modifier = Modifier.size(16.dp)) },
+				trailingIcon = if (filter.appPkgFilter.isNotEmpty()) {
+					{
+						Icon(
+							Icons.Default.Close,
+							contentDescription = "Clear app filter",
+							modifier = Modifier
+								.size(16.dp)
+								.clickable { vm.updateActivityFilter { it.copy(appPkgFilter = "") } },
+						)
+					}
+				} else {
+					null
+				},
+				label = { Text(activeAppLabel, fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
+			)
+
+			if (!isShowingRawList) {
 				FilterChip(
 					selected = !filter.isTopSort,
 					onClick = { vm.updateActivityFilter { it.copy(isTopSort = false) } },
-					label = { Text("Recent", fontSize = 11.5.sp, maxLines = 1) },
+					label = { Text("Recent", fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
 				)
 				FilterChip(
 					selected = filter.isTopSort,
 					onClick = { vm.updateActivityFilter { it.copy(isTopSort = true) } },
-					label = { Text("Top Hits", fontSize = 11.5.sp, maxLines = 1) },
+					label = { Text("Top Hits", fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
 				)
-				if (filter.viewMode == ACTIVITY_MODE_HTTPS_URLS) {
-					Spacer(Modifier.weight(1f))
-					Text(
-						text = "Intercepted HTTP/HTTPS/WS URLs",
-						fontSize = 11.sp,
-						color = MaterialTheme.colorScheme.onSurfaceVariant,
-						maxLines = 1,
-					)
-				}
 			}
 
-			if (aggItems.itemCount == 0) {
-				EmptyTrafficPlaceholder(
-					isHttpsTab = filter.viewMode == ACTIVITY_MODE_HTTPS_URLS,
+			if (filter.viewMode == ACTIVITY_MODE_HTTPS_URLS) {
+				FilterChip(
+					selected = filter.isShortenUrls,
+					onClick = { vm.updateActivityFilter { it.copy(isShortenUrls = !it.isShortenUrls) } },
+					label = { Text("Short URLs", fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
 				)
-			} else {
-				LazyColumn(
-					modifier = Modifier.fillMaxSize(),
-					contentPadding = PaddingValues(vertical = 2.dp),
-				) {
-					items(
-						count = aggItems.itemCount,
-						key = { idx -> aggItems.peek(idx)?.target ?: "agg_$idx" },
-						contentType = { "agg_row" },
-					) { idx ->
-						val item = aggItems[idx] ?: return@items
-						val customOverride = remember(item.target, item.isRoute, rulesRev) {
-							vm.matchCustomFast(item.target, item.isRoute)
+				if (!isShowingRawList) {
+					FilterChip(
+						selected = filter.isGroupHttpsByDomain,
+						onClick = {
+							vm.updateActivityFilter {
+								it.copy(isGroupHttpsByDomain = !it.isGroupHttpsByDomain, selectedHttpsDomain = "")
+							}
+						},
+						label = { Text("By Domain", fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
+					)
+				}
+				val typeLabel = when (filter.responseTypeFilter) {
+					"image" -> "Type: Images"
+					"video" -> "Type: Video"
+					"audio" -> "Type: Audio"
+					"default" -> "Type: Default"
+					"file" -> if (filter.customFileExt.isNotBlank()) "File: .${filter.customFileExt.trim().removePrefix(".")}" else "Type: Files"
+					else -> "Type: All"
+				}
+				FilterChip(
+					selected = filter.responseTypeFilter.isNotEmpty(),
+					onClick = { isTypeFilterDialogOpen = true },
+					trailingIcon = if (filter.responseTypeFilter.isNotEmpty()) {
+						{
+							Icon(
+								Icons.Default.Close,
+								contentDescription = "Clear type filter",
+								modifier = Modifier
+									.size(16.dp)
+									.clickable { vm.updateActivityFilter { it.copy(responseTypeFilter = "", customFileExt = "") } },
+							)
 						}
-						val appLabel = remember(item.lastApp, labelRev) { vm.appLabelFast(item.lastApp) }
-						AggregatedTrafficRow(
-							item = item,
-							nowMs = nowMs,
-							isOverrideBlocked = customOverride?.isBlocked,
-							overrideRule = customOverride?.summaryText() ?: "",
-							appLabel = appLabel,
-							onClick = {
-								selectedEntry = InspectedEntry(
-									target = item.target,
-									isBlocked = item.isBlocked,
-									isRoute = item.isRoute,
-									hitCount = item.hitCount,
-									firstSeen = item.firstSeen,
-									lastSeen = item.lastSeen,
-									appPkg = item.lastApp,
-									matchedRule = item.lastRule,
-									proto = if (item.isRoute) "HTTP/S" else "DNS",
+					} else {
+						null
+					},
+					label = { Text(typeLabel, fontSize = 11.5.sp, maxLines = 1, softWrap = false) },
+				)
+			}
+		}
+
+		AnimatedVisibility(visible = filter.viewMode == ACTIVITY_MODE_HTTPS_URLS && filter.selectedHttpsDomain.isNotEmpty()) {
+			Row(
+				verticalAlignment = Alignment.CenterVertically,
+				modifier = Modifier
+					.fillMaxWidth()
+					.background(MaterialTheme.colorScheme.surface)
+					.clickable { vm.updateActivityFilter { it.copy(selectedHttpsDomain = "") } }
+					.padding(horizontal = 12.dp, vertical = 8.dp),
+			) {
+				Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "All domains", tint = accent, modifier = Modifier.size(18.dp))
+				Spacer(Modifier.width(8.dp))
+				Text(
+					text = "Paths on ${filter.selectedHttpsDomain}",
+					fontWeight = FontWeight.SemiBold,
+					fontSize = 13.sp,
+					color = accent,
+					maxLines = 1,
+					overflow = TextOverflow.Ellipsis,
+					modifier = Modifier.weight(1f),
+				)
+				Text("All domains", fontSize = 11.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+			}
+		}
+
+		val listModeKey = when {
+			isShowingRawList -> "raw"
+			isShowingHttpsDomainList -> "domains"
+			else -> "agg_${filter.selectedHttpsDomain}"
+		}
+		AnimatedContent(
+			targetState = listModeKey,
+			transitionSpec = { fadeIn(tween(150)).togetherWith(fadeOut(tween(100))) },
+			label = "activity_list_mode",
+			modifier = Modifier.weight(1f),
+		) { modeKey ->
+			when {
+				modeKey == "raw" -> {
+					if (rawItems.itemCount == 0) {
+						EmptyTrafficPlaceholder(isHttpsTab = filter.viewMode == ACTIVITY_MODE_HTTPS_URLS)
+					} else {
+						LazyColumn(
+							modifier = Modifier.fillMaxSize(),
+							contentPadding = PaddingValues(vertical = 2.dp),
+						) {
+							items(
+								count = rawItems.itemCount,
+								key = { idx -> rawItems.peek(idx)?.id ?: (-idx.toLong()) },
+								contentType = { "raw_row" },
+							) { idx ->
+								val item = rawItems[idx] ?: return@items
+								val isRouteItem = item.target.indexOf('/') >= 0
+								val customOverride = remember(item.target, isRouteItem, rulesRev) {
+									vm.matchCustomFast(item.target, isRouteItem)
+								}
+								val appLabel = remember(item.appPkg, labelRev) { vm.appLabelFast(item.appPkg) }
+								val displayText = if (filter.viewMode == ACTIVITY_MODE_HTTPS_URLS && filter.isShortenUrls) {
+									shortenUrlForDisplay(item.target)
+								} else {
+									item.target
+								}
+								RawTrafficRow(
+									item = item,
+									displayTarget = displayText,
+									isOverrideBlocked = customOverride?.isBlocked,
+									overrideRule = customOverride?.summaryText() ?: "",
+									appLabel = appLabel,
+									onClick = {
+										selectedEntry = InspectedEntry(
+											target = item.target,
+											isBlocked = item.isBlocked,
+											isRoute = isRouteItem,
+											hitCount = 1L,
+											firstSeen = item.ts,
+											lastSeen = item.ts,
+											appPkg = item.appPkg,
+											matchedRule = item.matchedRule,
+											proto = item.proto,
+											contentType = item.contentType,
+											fileExt = item.fileExt,
+										)
+									},
+									onLongCopy = { copyTargetToClipboard(item.target) },
 								)
-							},
-							onLongCopy = { copyTargetToClipboard(item.target) },
-						)
-						HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+								HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+							}
+						}
 					}
 				}
-			}
-		} else {
-			if (rawItems.itemCount == 0) {
-				EmptyTrafficPlaceholder(
-					isHttpsTab = filter.viewMode == ACTIVITY_MODE_HTTPS_URLS,
-				)
-			} else {
-				LazyColumn(
-					modifier = Modifier.fillMaxSize(),
-					contentPadding = PaddingValues(vertical = 2.dp),
-				) {
-					items(
-						count = rawItems.itemCount,
-						key = { idx -> rawItems.peek(idx)?.id ?: (-idx.toLong()) },
-						contentType = { "raw_row" },
-					) { idx ->
-						val item = rawItems[idx] ?: return@items
-						val isRouteItem = item.target.indexOf('/') >= 0
-						val customOverride = remember(item.target, isRouteItem, rulesRev) {
-							vm.matchCustomFast(item.target, isRouteItem)
-						}
-						val appLabel = remember(item.appPkg, labelRev) { vm.appLabelFast(item.appPkg) }
-						RawTrafficRow(
-							item = item,
-							isOverrideBlocked = customOverride?.isBlocked,
-							overrideRule = customOverride?.summaryText() ?: "",
-							appLabel = appLabel,
-							onClick = {
-								selectedEntry = InspectedEntry(
-									target = item.target,
-									isBlocked = item.isBlocked,
-									isRoute = isRouteItem,
-									hitCount = 1L,
-									firstSeen = item.ts,
-									lastSeen = item.ts,
-									appPkg = item.appPkg,
-									matchedRule = item.matchedRule,
-									proto = item.proto,
+				modeKey == "domains" -> {
+					if (domainItems.itemCount == 0) {
+						EmptyTrafficPlaceholder(isHttpsTab = true)
+					} else {
+						LazyColumn(
+							modifier = Modifier.fillMaxSize(),
+							contentPadding = PaddingValues(vertical = 2.dp),
+						) {
+							items(
+								count = domainItems.itemCount,
+								key = { idx -> domainItems.peek(idx)?.host ?: "dom_$idx" },
+								contentType = { "https_domain_row" },
+							) { idx ->
+								val grp = domainItems[idx] ?: return@items
+								val appLabel = remember(grp.lastApp, labelRev) { vm.appLabelFast(grp.lastApp) }
+								HttpsDomainGroupRow(
+									group = grp,
+									nowMs = nowMs,
+									appLabel = appLabel,
+									onClick = { vm.updateActivityFilter { it.copy(selectedHttpsDomain = grp.host) } },
+									onLongCopy = { copyTargetToClipboard(grp.host) },
 								)
-							},
-							onLongCopy = { copyTargetToClipboard(item.target) },
-						)
-						HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+								HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+							}
+						}
+					}
+				}
+				else -> {
+					if (aggItems.itemCount == 0) {
+						EmptyTrafficPlaceholder(isHttpsTab = filter.viewMode == ACTIVITY_MODE_HTTPS_URLS)
+					} else {
+						LazyColumn(
+							modifier = Modifier.fillMaxSize(),
+							contentPadding = PaddingValues(vertical = 2.dp),
+						) {
+							items(
+								count = aggItems.itemCount,
+								key = { idx -> aggItems.peek(idx)?.target ?: "agg_$idx" },
+								contentType = { "agg_row" },
+							) { idx ->
+								val item = aggItems[idx] ?: return@items
+								val customOverride = remember(item.target, item.isRoute, rulesRev) {
+									vm.matchCustomFast(item.target, item.isRoute)
+								}
+								val appLabel = remember(item.lastApp, labelRev) { vm.appLabelFast(item.lastApp) }
+								val displayText = if (filter.viewMode == ACTIVITY_MODE_HTTPS_URLS && filter.isShortenUrls) {
+									shortenUrlForDisplay(item.target)
+								} else {
+									item.target
+								}
+								AggregatedTrafficRow(
+									item = item,
+									displayTarget = displayText,
+									nowMs = nowMs,
+									isOverrideBlocked = customOverride?.isBlocked,
+									overrideRule = customOverride?.summaryText() ?: "",
+									appLabel = appLabel,
+									onClick = {
+										selectedEntry = InspectedEntry(
+											target = item.target,
+											isBlocked = item.isBlocked,
+											isRoute = item.isRoute,
+											hitCount = item.hitCount,
+											firstSeen = item.firstSeen,
+											lastSeen = item.lastSeen,
+											appPkg = item.lastApp,
+											matchedRule = item.lastRule,
+											proto = if (item.isRoute) "HTTP/S" else "DNS",
+											contentType = item.contentType,
+											fileExt = item.fileExt,
+										)
+									},
+									onLongCopy = { copyTargetToClipboard(item.target) },
+								)
+								HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+							}
+						}
 					}
 				}
 			}
 		}
+	}
+
+	if (isAppFilterDialogOpen) {
+		ActivityAppFilterDialog(
+			loggedPackages = loggedApps,
+			installedApps = installedApps,
+			selectedPkg = filter.appPkgFilter,
+			resolveLabel = { pkg -> vm.appLabelFast(pkg) },
+			getCachedIcon = { pkg -> vm.getCachedAppIcon(pkg) },
+			getIcon = { pkg -> vm.getAppIcon(pkg) },
+			onDismiss = { isAppFilterDialogOpen = false },
+			onSelect = { pkg ->
+				vm.updateActivityFilter { it.copy(appPkgFilter = pkg) }
+				isAppFilterDialogOpen = false
+			},
+		)
+	}
+
+	if (isTypeFilterDialogOpen) {
+		ResponseTypeFilterDialog(
+			currentType = filter.responseTypeFilter,
+			currentExt = filter.customFileExt,
+			onDismiss = { isTypeFilterDialogOpen = false },
+			onApply = { typeVal, extVal ->
+				vm.updateActivityFilter { it.copy(responseTypeFilter = typeVal, customFileExt = extVal) }
+				isTypeFilterDialogOpen = false
+			},
+		)
 	}
 
 	selectedEntry?.let { entry ->
@@ -806,8 +1053,62 @@ private fun EmptyTrafficPlaceholder(isHttpsTab: Boolean = false) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
+private fun HttpsDomainGroupRow(
+	group: HttpsDomainGroup,
+	nowMs: Long,
+	appLabel: String,
+	onClick: () -> Unit,
+	onLongCopy: () -> Unit,
+) {
+	val accent = MaterialTheme.colorScheme.primary
+	Row(
+		verticalAlignment = Alignment.CenterVertically,
+		modifier = Modifier
+			.fillMaxWidth()
+			.combinedClickable(onClick = onClick, onLongClick = onLongCopy)
+			.padding(horizontal = 12.dp, vertical = 9.dp),
+	) {
+		Icon(
+			imageVector = Icons.Default.Language,
+			contentDescription = null,
+			tint = if (group.blockedHits > 0L) ShieldRed else accent,
+			modifier = Modifier.size(22.dp),
+		)
+		Spacer(Modifier.width(10.dp))
+		Column(modifier = Modifier.weight(1f)) {
+			Text(
+				text = group.host,
+				fontSize = 13.5.sp,
+				fontWeight = FontWeight.SemiBold,
+				maxLines = 1,
+				overflow = TextOverflow.Ellipsis,
+			)
+			val meta = buildString(96) {
+				append("${group.routeCount} path(s)")
+				append(" • ${group.totalHits}x")
+				if (group.blockedHits > 0L)
+					append(" • ${group.blockedHits} blocked")
+				append(" • ").append(formatRelativeTime(group.lastSeen, nowMs))
+				if (appLabel.isNotEmpty())
+					append(" • ").append(appLabel)
+			}
+			Text(
+				text = meta,
+				fontSize = 11.sp,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+				maxLines = 1,
+				overflow = TextOverflow.Ellipsis,
+			)
+		}
+		Icon(Icons.Default.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+	}
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 private fun AggregatedTrafficRow(
 	item: AggregatedLog,
+	displayTarget: String,
 	nowMs: Long,
 	isOverrideBlocked: Boolean?,
 	overrideRule: String,
@@ -816,6 +1117,7 @@ private fun AggregatedTrafficRow(
 	onLongCopy: () -> Unit,
 ) {
 	val isVisuallyBlocked = isOverrideBlocked ?: item.isBlocked
+	val typeBadge = formatResponseTypeBadge(item.contentType, item.fileExt)
 
 	Row(
 		verticalAlignment = Alignment.CenterVertically,
@@ -836,7 +1138,7 @@ private fun AggregatedTrafficRow(
 		Spacer(Modifier.width(10.dp))
 		Column(modifier = Modifier.weight(1f)) {
 			Text(
-				text = item.target,
+				text = displayTarget,
 				fontSize = 13.5.sp,
 				fontWeight = FontWeight.Medium,
 				maxLines = 1,
@@ -847,6 +1149,8 @@ private fun AggregatedTrafficRow(
 				append(" • ")
 				append(if (item.isBlocked) "blocked " else "allowed ")
 				append(item.hitCount).append('x')
+				if (typeBadge.isNotEmpty())
+					append(" • ").append(typeBadge)
 				if (appLabel.isNotEmpty())
 					append(" • ").append(appLabel)
 				val ruleInfo = overrideRule.ifEmpty { item.lastRule }
@@ -885,6 +1189,7 @@ private fun AggregatedTrafficRow(
 @Composable
 private fun RawTrafficRow(
 	item: RawLog,
+	displayTarget: String,
 	isOverrideBlocked: Boolean?,
 	overrideRule: String,
 	appLabel: String,
@@ -892,6 +1197,7 @@ private fun RawTrafficRow(
 	onLongCopy: () -> Unit,
 ) {
 	val isVisuallyBlocked = isOverrideBlocked ?: item.isBlocked
+	val typeBadge = formatResponseTypeBadge(item.contentType, item.fileExt)
 
 	Row(
 		verticalAlignment = Alignment.CenterVertically,
@@ -912,7 +1218,7 @@ private fun RawTrafficRow(
 		Spacer(Modifier.width(10.dp))
 		Column(modifier = Modifier.weight(1f)) {
 			Text(
-				text = item.target,
+				text = displayTarget,
 				fontSize = 13.5.sp,
 				fontWeight = FontWeight.Medium,
 				maxLines = 1,
@@ -921,6 +1227,8 @@ private fun RawTrafficRow(
 			val meta = buildString(96) {
 				append(formatShortClockFast(item.ts))
 				append(" • ").append(item.proto)
+				if (typeBadge.isNotEmpty())
+					append(" • ").append(typeBadge)
 				if (appLabel.isNotEmpty())
 					append(" • ").append(appLabel)
 				val ruleInfo = overrideRule.ifEmpty { item.matchedRule }
@@ -953,6 +1261,187 @@ private fun RawTrafficRow(
 			}
 		}
 	}
+}
+
+@Composable
+private fun ActivityAppFilterDialog(
+	loggedPackages: List<String>,
+	installedApps: List<InstalledAppItem>,
+	selectedPkg: String,
+	resolveLabel: (String) -> String,
+	getCachedIcon: (String) -> ImageBitmap?,
+	getIcon: suspend (String) -> ImageBitmap?,
+	onDismiss: () -> Unit,
+	onSelect: (String) -> Unit,
+) {
+	var query by remember { mutableStateOf("") }
+	val accent = MaterialTheme.colorScheme.primary
+
+	val candidates = remember(loggedPackages, installedApps, query) {
+		val seen = LinkedHashSet<String>()
+		val ordered = ArrayList<Pair<String, String>>(loggedPackages.size + installedApps.size)
+		for (pkg in loggedPackages) {
+			if (pkg.isNotEmpty() && seen.add(pkg))
+				ordered.add(pkg to resolveLabel(pkg))
+		}
+		for (app in installedApps) {
+			if (seen.add(app.packageName))
+				ordered.add(app.packageName to "${app.label} (${app.packageName})")
+		}
+		if (query.isBlank()) {
+			ordered
+		} else {
+			ordered.filter { (pkg, lbl) ->
+				lbl.contains(query, ignoreCase = true) || pkg.contains(query, ignoreCase = true)
+			}
+		}
+	}
+
+	AlertDialog(
+		onDismissRequest = onDismiss,
+		containerColor = MaterialTheme.colorScheme.surface,
+		title = { Text("Filter by App", fontWeight = FontWeight.Bold) },
+		text = {
+			Column {
+				OutlinedTextField(
+					value = query,
+					onValueChange = { query = it },
+					placeholder = { Text("Search app or package...") },
+					leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+					singleLine = true,
+					modifier = Modifier.fillMaxWidth(),
+				)
+				Spacer(Modifier.height(8.dp))
+				Row(
+					verticalAlignment = Alignment.CenterVertically,
+					modifier = Modifier
+						.fillMaxWidth()
+						.clip(RoundedCornerShape(8.dp))
+						.background(if (selectedPkg.isEmpty()) accent.copy(alpha = 0.14f) else Color.Transparent)
+						.clickable { onSelect("") }
+						.padding(horizontal = 8.dp, vertical = 10.dp),
+				) {
+					Icon(Icons.Default.Apps, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+					Spacer(Modifier.width(10.dp))
+					Text("All Apps", fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
+				}
+				HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+				LazyColumn(modifier = Modifier.height(300.dp)) {
+					items(candidates, key = { it.first }) { (pkg, label) ->
+						val isSelected = pkg == selectedPkg
+						val cachedBmp = remember(pkg) { getCachedIcon(pkg) }
+						val bmp by produceState(initialValue = cachedBmp, key1 = pkg) {
+							if (value == null)
+								value = getIcon(pkg)
+						}
+						Row(
+							verticalAlignment = Alignment.CenterVertically,
+							modifier = Modifier
+								.fillMaxWidth()
+								.clip(RoundedCornerShape(8.dp))
+								.background(if (isSelected) accent.copy(alpha = 0.14f) else Color.Transparent)
+								.clickable { onSelect(pkg) }
+								.padding(horizontal = 8.dp, vertical = 7.dp),
+						) {
+							val icon = bmp
+							if (icon != null) {
+								Image(bitmap = icon, contentDescription = null, modifier = Modifier.size(28.dp).clip(RoundedCornerShape(6.dp)))
+							} else {
+								Box(Modifier.size(28.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant))
+							}
+							Spacer(Modifier.width(10.dp))
+							Column(modifier = Modifier.weight(1f)) {
+								Text(label.substringBefore(" ("), fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+								Text(pkg, fontSize = 10.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+							}
+						}
+					}
+				}
+			}
+		},
+		confirmButton = {
+			TextButton(onClick = onDismiss) { Text("Close") }
+		},
+	)
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ResponseTypeFilterDialog(
+	currentType: String,
+	currentExt: String,
+	onDismiss: () -> Unit,
+	onApply: (String, String) -> Unit,
+) {
+	var selectedType by remember { mutableStateOf(currentType) }
+	var extText by remember { mutableStateOf(currentExt) }
+
+	AlertDialog(
+		onDismissRequest = onDismiss,
+		containerColor = MaterialTheme.colorScheme.surface,
+		title = { Text("Response Type Filter", fontWeight = FontWeight.Bold) },
+		text = {
+			Column {
+				FlowRow(
+					horizontalArrangement = Arrangement.spacedBy(8.dp),
+					verticalArrangement = Arrangement.spacedBy(6.dp),
+				) {
+					for ((key, label) in listOf(
+						"" to "All",
+						"image" to "Images",
+						"video" to "Video",
+						"audio" to "Audio",
+						"file" to "File / Ext",
+						"default" to "Default (HTML / API)",
+					)) {
+						FilterChip(
+							selected = selectedType == key,
+							onClick = { selectedType = key },
+							label = { Text(label, fontSize = 12.sp, maxLines = 1, softWrap = false) },
+						)
+					}
+				}
+
+				AnimatedVisibility(visible = selectedType == "file") {
+					Column {
+						Spacer(Modifier.height(10.dp))
+						OutlinedTextField(
+							value = extText,
+							onValueChange = { extText = it.trim().lowercase().removePrefix(".").take(10) },
+							label = { Text("Extension (blank = any file)", maxLines = 1) },
+							placeholder = { Text("e.g. apk, pdf, zip, js, json", maxLines = 1) },
+							singleLine = true,
+							modifier = Modifier.fillMaxWidth(),
+						)
+						Spacer(Modifier.height(8.dp))
+						FlowRow(
+							horizontalArrangement = Arrangement.spacedBy(6.dp),
+							verticalArrangement = Arrangement.spacedBy(4.dp),
+						) {
+							for (presetExt in listOf("apk", "pdf", "zip", "js", "json", "m3u8")) {
+								FilterChip(
+									selected = extText == presetExt,
+									onClick = { extText = if (extText == presetExt) "" else presetExt },
+									label = { Text(".$presetExt", fontSize = 11.5.sp, maxLines = 1) },
+								)
+							}
+						}
+					}
+				}
+			}
+		},
+		confirmButton = {
+			Button(onClick = {
+				val cleanExt = if (selectedType == "file") extText.trim().lowercase().removePrefix(".") else ""
+				onApply(selectedType, cleanExt)
+			}) {
+				Text("Apply")
+			}
+		},
+		dismissButton = {
+			TextButton(onClick = onDismiss) { Text("Cancel") }
+		},
+	)
 }
 
 @Composable
@@ -1065,6 +1554,9 @@ private fun ActivityDetailSheet(
 		Text("Information", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
 		Spacer(Modifier.height(6.dp))
 		InfoField("Full target", entry.target)
+		val respTypeLabel = formatResponseTypeBadge(entry.contentType, entry.fileExt)
+		if (respTypeLabel.isNotEmpty())
+			InfoField("Response type", respTypeLabel)
 		InfoField("Rule source", effectiveRuleSource)
 		if (effectiveRulePattern.isNotEmpty())
 			InfoField("Matched rule", effectiveRulePattern)

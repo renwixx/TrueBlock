@@ -53,6 +53,8 @@ fun escapeSqlLike(raw: String): String {
 		Index(value = ["hitCount"]),
 		Index(value = ["isBlocked", "lastSeen"]),
 		Index(value = ["isRoute", "lastSeen"]),
+		Index(value = ["host"]),
+		Index(value = ["lastApp"]),
 	],
 )
 data class AggregatedLog(
@@ -67,6 +69,9 @@ data class AggregatedLog(
 	val blockedHits: Long = 0L,
 	val allowedHits: Long = 0L,
 	val cnameHits: Long = 0L,
+	val host: String = "",
+	val contentType: String = "",
+	val fileExt: String = "",
 )
 
 @Immutable
@@ -75,6 +80,7 @@ data class AggregatedLog(
 	indices = [
 		Index(value = ["isBlocked", "id"]),
 		Index(value = ["ts"]),
+		Index(value = ["appPkg"]),
 	],
 )
 data class RawLog(
@@ -86,6 +92,8 @@ data class RawLog(
 	val appPkg: String,
 	val matchedRule: String,
 	val ts: Long,
+	val contentType: String = "",
+	val fileExt: String = "",
 )
 
 @Immutable
@@ -176,6 +184,16 @@ data class AppTrafficRow(
 	val uniqueDomains: Int,
 )
 
+@Immutable
+data class HttpsDomainGroup(
+	val host: String,
+	val routeCount: Int,
+	val totalHits: Long,
+	val blockedHits: Long,
+	val lastSeen: Long,
+	val lastApp: String,
+)
+
 data class TrafficSample(
 	val target: String,
 	val host: String,
@@ -186,6 +204,8 @@ data class TrafficSample(
 	val matchedRule: String,
 	val ts: Long = System.currentTimeMillis(),
 	val isCname: Boolean = proto == "CNAME",
+	val contentType: String = "",
+	val fileExt: String = "",
 )
 
 data class TrackerParamSample(
@@ -201,33 +221,120 @@ interface TrafficDao {
 		SELECT * FROM traffic_agg
 		WHERE (:blockFilter = -1 OR isBlocked = :blockFilter)
 		AND (:routeMode = -1 OR isRoute = :routeMode)
+		AND (:appPkg = '' OR lastApp = :appPkg)
+		AND (:hostFilter = '' OR host = :hostFilter)
+		AND (
+			:typeFilter = ''
+			OR (:typeFilter IN ('image', 'video', 'audio') AND contentType = :typeFilter)
+			OR (:typeFilter = 'default' AND (contentType = 'default' OR (contentType = '' AND fileExt = '')))
+			OR (:typeFilter = 'file' AND :customExt = '' AND contentType = 'file')
+			OR (:typeFilter = 'file' AND :customExt != '' AND (fileExt = :customExt OR lower(target) LIKE '%.' || :customExt || '%' ESCAPE '\'))
+		)
 		AND (:q = '' OR target LIKE '%' || :q || '%' ESCAPE '\')
 		ORDER BY lastSeen DESC
 		"""
 	)
-	fun pageRecent(q: String, blockFilter: Int, routeMode: Int): PagingSource<Int, AggregatedLog>
+	fun pageRecent(
+		q: String,
+		blockFilter: Int,
+		routeMode: Int,
+		appPkg: String = "",
+		typeFilter: String = "",
+		customExt: String = "",
+		hostFilter: String = "",
+	): PagingSource<Int, AggregatedLog>
 
 	@Query(
 		"""
 		SELECT * FROM traffic_agg
 		WHERE (:blockFilter = -1 OR isBlocked = :blockFilter)
 		AND (:routeMode = -1 OR isRoute = :routeMode)
+		AND (:appPkg = '' OR lastApp = :appPkg)
+		AND (:hostFilter = '' OR host = :hostFilter)
+		AND (
+			:typeFilter = ''
+			OR (:typeFilter IN ('image', 'video', 'audio') AND contentType = :typeFilter)
+			OR (:typeFilter = 'default' AND (contentType = 'default' OR (contentType = '' AND fileExt = '')))
+			OR (:typeFilter = 'file' AND :customExt = '' AND contentType = 'file')
+			OR (:typeFilter = 'file' AND :customExt != '' AND (fileExt = :customExt OR lower(target) LIKE '%.' || :customExt || '%' ESCAPE '\'))
+		)
 		AND (:q = '' OR target LIKE '%' || :q || '%' ESCAPE '\')
 		ORDER BY hitCount DESC, lastSeen DESC
 		"""
 	)
-	fun pageTop(q: String, blockFilter: Int, routeMode: Int): PagingSource<Int, AggregatedLog>
+	fun pageTop(
+		q: String,
+		blockFilter: Int,
+		routeMode: Int,
+		appPkg: String = "",
+		typeFilter: String = "",
+		customExt: String = "",
+		hostFilter: String = "",
+	): PagingSource<Int, AggregatedLog>
+
+	@Query(
+		"""
+		SELECT
+			host AS host,
+			COUNT(*) AS routeCount,
+			SUM(hitCount) AS totalHits,
+			SUM(blockedHits) AS blockedHits,
+			MAX(lastSeen) AS lastSeen,
+			MAX(lastApp) AS lastApp
+		FROM traffic_agg
+		WHERE isRoute = 1
+		AND host != ''
+		AND (:blockFilter = -1 OR isBlocked = :blockFilter)
+		AND (:appPkg = '' OR lastApp = :appPkg)
+		AND (
+			:typeFilter = ''
+			OR (:typeFilter IN ('image', 'video', 'audio') AND contentType = :typeFilter)
+			OR (:typeFilter = 'default' AND (contentType = 'default' OR (contentType = '' AND fileExt = '')))
+			OR (:typeFilter = 'file' AND :customExt = '' AND contentType = 'file')
+			OR (:typeFilter = 'file' AND :customExt != '' AND (fileExt = :customExt OR lower(target) LIKE '%.' || :customExt || '%' ESCAPE '\'))
+		)
+		AND (:q = '' OR target LIKE '%' || :q || '%' ESCAPE '\')
+		GROUP BY host
+		ORDER BY CASE WHEN :isTopSort = 1 THEN SUM(hitCount) ELSE MAX(lastSeen) END DESC
+		"""
+	)
+	fun pageHttpsDomains(
+		q: String,
+		blockFilter: Int,
+		appPkg: String,
+		typeFilter: String,
+		customExt: String,
+		isTopSort: Int,
+	): PagingSource<Int, HttpsDomainGroup>
 
 	@Query(
 		"""
 		SELECT * FROM traffic_raw
 		WHERE (:blockFilter = -1 OR isBlocked = :blockFilter)
 		AND (:isRoutesOnly = 0 OR target LIKE '%/%')
+		AND (:appPkg = '' OR appPkg = :appPkg)
+		AND (
+			:typeFilter = ''
+			OR (:typeFilter IN ('image', 'video', 'audio') AND contentType = :typeFilter)
+			OR (:typeFilter = 'default' AND (contentType = 'default' OR (contentType = '' AND fileExt = '')))
+			OR (:typeFilter = 'file' AND :customExt = '' AND contentType = 'file')
+			OR (:typeFilter = 'file' AND :customExt != '' AND (fileExt = :customExt OR lower(target) LIKE '%.' || :customExt || '%' ESCAPE '\'))
+		)
 		AND (:q = '' OR target LIKE '%' || :q || '%' ESCAPE '\' OR appPkg LIKE '%' || :q || '%' ESCAPE '\')
 		ORDER BY id DESC
 		"""
 	)
-	fun pageRaw(q: String, blockFilter: Int, isRoutesOnly: Int = 0): PagingSource<Int, RawLog>
+	fun pageRaw(
+		q: String,
+		blockFilter: Int,
+		isRoutesOnly: Int = 0,
+		appPkg: String = "",
+		typeFilter: String = "",
+		customExt: String = "",
+	): PagingSource<Int, RawLog>
+
+	@Query("SELECT appPkg FROM app_traffic_stats WHERE appPkg != '' ORDER BY totalHits DESC LIMIT 200")
+	fun observeLoggedAppPackages(): Flow<List<String>>
 
 	@Query("SELECT * FROM traffic_agg WHERE target = :target LIMIT 1")
 	suspend fun getAggByTarget(target: String): AggregatedLog?
@@ -236,11 +343,11 @@ interface TrafficDao {
 		"""
 		INSERT INTO traffic_agg (
 			target, isBlocked, isRoute, hitCount, firstSeen, lastSeen, lastApp, lastRule,
-			blockedHits, allowedHits, cnameHits
+			blockedHits, allowedHits, cnameHits, host, contentType, fileExt
 		)
 		VALUES (
 			:target, :isBlocked, :isRoute, :delta, :firstSeen, :lastSeen, :lastApp, :lastRule,
-			:blockedDelta, :allowedDelta, :cnameDelta
+			:blockedDelta, :allowedDelta, :cnameDelta, :host, :contentType, :fileExt
 		)
 		ON CONFLICT(target) DO UPDATE SET
 			hitCount = hitCount + :delta,
@@ -255,7 +362,10 @@ interface TrafficDao {
 				WHEN lastApp = '' THEN :lastApp
 				ELSE lastApp
 			END,
-			lastRule = :lastRule
+			lastRule = :lastRule,
+			host = CASE WHEN :host != '' THEN :host ELSE host END,
+			contentType = CASE WHEN :contentType != '' THEN :contentType ELSE contentType END,
+			fileExt = CASE WHEN :fileExt != '' THEN :fileExt ELSE fileExt END
 		"""
 	)
 	suspend fun upsertAgg(
@@ -270,6 +380,9 @@ interface TrafficDao {
 		lastSeen: Long,
 		lastApp: String,
 		lastRule: String,
+		host: String,
+		contentType: String,
+		fileExt: String,
 	)
 
 	@Query(
@@ -340,6 +453,9 @@ interface TrafficDao {
 				lastSeen = item.lastSeen,
 				lastApp = item.lastApp,
 				lastRule = item.lastRule,
+				host = item.host,
+				contentType = item.contentType,
+				fileExt = item.fileExt,
 			)
 		}
 		if (totalReqDelta > 0L)
@@ -482,6 +598,9 @@ data class AggBatchItem(
 	var lastSeen: Long,
 	var lastApp: String,
 	var lastRule: String,
+	var host: String = "",
+	var contentType: String = "",
+	var fileExt: String = "",
 )
 
 data class HourlyBatchItem(
@@ -734,6 +853,29 @@ private val MIGRATION_2_3 = object : Migration(2, 3) {
 	}
 }
 
+private val MIGRATION_3_4 = object : Migration(3, 4) {
+	override fun migrate(db: SupportSQLiteDatabase) {
+		db.execSQL("ALTER TABLE `traffic_agg` ADD COLUMN `host` TEXT NOT NULL DEFAULT ''")
+		db.execSQL("ALTER TABLE `traffic_agg` ADD COLUMN `contentType` TEXT NOT NULL DEFAULT ''")
+		db.execSQL("ALTER TABLE `traffic_agg` ADD COLUMN `fileExt` TEXT NOT NULL DEFAULT ''")
+		db.execSQL(
+			"""
+			UPDATE `traffic_agg`
+			SET `host` = CASE
+				WHEN instr(`target`, '/') > 0 THEN substr(`target`, 1, instr(`target`, '/') - 1)
+				ELSE `target`
+			END
+			WHERE `host` = ''
+			""".trimIndent()
+		)
+		db.execSQL("CREATE INDEX IF NOT EXISTS `index_traffic_agg_host` ON `traffic_agg` (`host`)")
+		db.execSQL("CREATE INDEX IF NOT EXISTS `index_traffic_agg_lastApp` ON `traffic_agg` (`lastApp`)")
+		db.execSQL("ALTER TABLE `traffic_raw` ADD COLUMN `contentType` TEXT NOT NULL DEFAULT ''")
+		db.execSQL("ALTER TABLE `traffic_raw` ADD COLUMN `fileExt` TEXT NOT NULL DEFAULT ''")
+		db.execSQL("CREATE INDEX IF NOT EXISTS `index_traffic_raw_appPkg` ON `traffic_raw` (`appPkg`)")
+	}
+}
+
 @Database(
 	entities = [
 		AggregatedLog::class,
@@ -745,7 +887,7 @@ private val MIGRATION_2_3 = object : Migration(2, 3) {
 		HourlyBucket::class,
 		AppTrafficStatEntity::class,
 	],
-	version = 3,
+	version = 4,
 	exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -767,7 +909,7 @@ abstract class AppDatabase : RoomDatabase() {
 					AppDatabase::class.java,
 					"true_adblocker.db",
 				)
-					.addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+					.addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
 					.setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
 					.fallbackToDestructiveMigrationOnDowngrade()
 					.build()
@@ -890,6 +1032,7 @@ class TrafficPipeline(
 			totalAllowedDelta += aDelta
 			totalCnameDelta += cDelta
 
+			val resolvedHost = s.host.ifEmpty { s.target.substringBefore('/') }
 			val existing = aggMap[s.target]
 			if (existing == null) {
 				aggMap[s.target] = AggBatchItem(
@@ -904,6 +1047,9 @@ class TrafficPipeline(
 					lastSeen = s.ts,
 					lastApp = s.appPkg,
 					lastRule = s.matchedRule,
+					host = resolvedHost,
+					contentType = s.contentType,
+					fileExt = s.fileExt,
 				)
 			} else {
 				existing.delta += 1L
@@ -922,6 +1068,12 @@ class TrafficPipeline(
 					existing.lastApp = s.appPkg
 				else if (existing.lastApp.isEmpty())
 					existing.lastApp = s.appPkg
+				if (resolvedHost.isNotEmpty())
+					existing.host = resolvedHost
+				if (s.contentType.isNotEmpty())
+					existing.contentType = s.contentType
+				if (s.fileExt.isNotEmpty())
+					existing.fileExt = s.fileExt
 			}
 
 			val hour = s.ts / 3_600_000L
@@ -949,12 +1101,14 @@ class TrafficPipeline(
 				rawList.add(
 					RawLog(
 						target = s.target,
-						host = s.host,
+						host = resolvedHost,
 						proto = s.proto,
 						isBlocked = s.isBlocked,
 						appPkg = s.appPkg,
 						matchedRule = s.matchedRule,
 						ts = s.ts,
+						contentType = s.contentType,
+						fileExt = s.fileExt,
 					)
 				)
 			}
