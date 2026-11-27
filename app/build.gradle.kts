@@ -28,6 +28,10 @@ val isReleaseKeystoreConfigured = releaseStorePath != null &&
 	releaseKeyPassword != null &&
 	rootProject.file(releaseStorePath).exists()
 
+val buildVersionCode = System.getenv("BUILD_VERSION_CODE")?.toIntOrNull() ?: 3
+val buildVersionName = System.getenv("BUILD_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.3.0"
+val buildCommitSha = System.getenv("BUILD_COMMIT")?.takeIf { it.isNotBlank() } ?: "local"
+
 android {
 	namespace = "com.renwixx.trueadblocker"
 	compileSdk = 35
@@ -36,8 +40,9 @@ android {
 		applicationId = "com.renwixx.trueadblocker"
 		minSdk = 29
 		targetSdk = 35
-		versionCode = 3
-		versionName = "1.3.0"
+		versionCode = buildVersionCode
+		versionName = buildVersionName
+		buildConfigField("String", "BUILD_COMMIT", "\"$buildCommitSha\"")
 
 		testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 	}

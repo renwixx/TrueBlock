@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
@@ -68,6 +69,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -132,6 +134,7 @@ fun HomeScreen(
 	val totalParamsRemoved by vm.totalTrackerParamsRemoved.collectAsState()
 	val totalCname by vm.totalCnameUncloaked.collectAsState()
 	val installedSet by vm.installedPkgSet.collectAsState()
+	val updateState by vm.updateState.collectAsState()
 	val accent = MaterialTheme.colorScheme.primary
 
 	var isMenuOpen by remember { mutableStateOf(false) }
@@ -427,7 +430,85 @@ fun HomeScreen(
 			}
 		}
 
-		Spacer(Modifier.height(14.dp))
+		val isUpdateBannerVisible = updateState is UpdateUiState.Available ||
+			updateState is UpdateUiState.Downloading ||
+			updateState is UpdateUiState.ReadyToInstall
+		AnimatedVisibility(visible = isUpdateBannerVisible) {
+			Column {
+				val uState = updateState
+				val info = when (uState) {
+					is UpdateUiState.Available -> uState.info
+					is UpdateUiState.Downloading -> uState.info
+					is UpdateUiState.ReadyToInstall -> uState.info
+					else -> null
+				}
+				if (info != null) {
+					Column(
+						modifier = Modifier
+							.fillMaxWidth()
+							.clip(RoundedCornerShape(14.dp))
+							.background(accent.copy(alpha = 0.12f))
+							.border(1.dp, accent.copy(alpha = 0.55f), RoundedCornerShape(14.dp))
+							.padding(horizontal = 14.dp, vertical = 10.dp),
+					) {
+						Row(verticalAlignment = Alignment.CenterVertically) {
+							Icon(Icons.Default.FileDownload, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+							Spacer(Modifier.width(10.dp))
+							Column(modifier = Modifier.weight(1f)) {
+								Text(
+									text = "Update available: ${info.versionName}",
+									fontWeight = FontWeight.SemiBold,
+									fontSize = 13.5.sp,
+									maxLines = 1,
+									overflow = TextOverflow.Ellipsis,
+								)
+								if (info.notes.isNotEmpty()) {
+									Text(
+										text = info.notes,
+										fontSize = 11.5.sp,
+										color = MaterialTheme.colorScheme.onSurfaceVariant,
+										maxLines = 1,
+										overflow = TextOverflow.Ellipsis,
+									)
+								}
+							}
+							Spacer(Modifier.width(8.dp))
+							if (uState is UpdateUiState.Downloading) {
+								Text(
+									text = "${(uState.progress * 100).toInt()}%",
+									fontWeight = FontWeight.Bold,
+									fontSize = 12.sp,
+									color = accent,
+								)
+							} else {
+								Button(
+									onClick = { vm.downloadAndInstallUpdate() },
+									contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+								) {
+									Text(
+										text = if (uState is UpdateUiState.ReadyToInstall) "Install" else "Update",
+										fontSize = 12.sp,
+										maxLines = 1,
+									)
+								}
+							}
+						}
+						if (uState is UpdateUiState.Downloading) {
+							Spacer(Modifier.height(6.dp))
+							LinearProgressIndicator(
+								progress = { uState.progress.coerceIn(0f, 1f) },
+								color = accent,
+								trackColor = MaterialTheme.colorScheme.outline,
+								modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+							)
+						}
+					}
+					Spacer(Modifier.height(10.dp))
+				}
+			}
+		}
+
+		Spacer(Modifier.height(10.dp))
 
 		val isHttpsTrusted = cfg.isHttpsFiltering && ca.isReady && ca.isInstalledInSystem
 		val installedHttpsCount = remember(cfg.httpsInspectedApps, installedSet) {

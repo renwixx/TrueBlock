@@ -36,6 +36,8 @@ import com.renwixx.trueadblocker.engine.GitHubBlocklistExplorer
 import com.renwixx.trueadblocker.engine.GitHubRawListCandidate
 import com.renwixx.trueadblocker.engine.GitHubRepoItem
 import com.renwixx.trueadblocker.net.AdBlockVpnService
+import com.renwixx.trueadblocker.net.AppUpdater
+import com.renwixx.trueadblocker.net.UpdateInfo
 import com.renwixx.trueadblocker.net.UpstreamProxy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -89,6 +91,16 @@ data class InstalledAppItem(
 	val label: String,
 	val isSystem: Boolean,
 )
+
+sealed interface UpdateUiState {
+	data object Idle : UpdateUiState
+	data object Checking : UpdateUiState
+	data object UpToDate : UpdateUiState
+	data class Available(val info: UpdateInfo) : UpdateUiState
+	data class Downloading(val info: UpdateInfo, val progress: Float) : UpdateUiState
+	data class ReadyToInstall(val info: UpdateInfo, val file: File) : UpdateUiState
+	data class Error(val message: String) : UpdateUiState
+}
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -168,6 +180,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 	private val _stagedImport = MutableStateFlow<Pair<String, BackupInspection>?>(null)
 	val stagedImport: StateFlow<Pair<String, BackupInspection>?> = _stagedImport.asStateFlow()
 
+	private val _updateState = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
+	val updateState: StateFlow<UpdateUiState> = _updateState.asStateFlow()
+
 	private val _toastChannel = Channel<String>(Channel.BUFFERED)
 	val toastEvents: Flow<String> = _toastChannel.receiveAsFlow()
 
@@ -195,6 +210,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 				_fastLabels[k] = v
 		}
 		loadInstalledAppsIfNeeded()
+		checkForUpdates(isSilent = true)
 	}
 
 	val pagedAggregated: Flow<PagingData<AggregatedLog>> = _activityFilter
@@ -826,5 +842,81 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 	fun dismissStagedImport() {
 		_stagedImport.value = null
+	}
+
+	fun checkForUpdates(isSilent: Boolean = false) {
+		val cur = _updateState.value
+		if (cur is UpdateUiState.Checking || cur is UpdateUiState.Downloading)
+			return
+
+		if (!isSilent)
+			_updateState.value = UpdateUiState.Checking
+
+		viewModelScope.launch(Dispatchers.IO) {
+			val res = AppUpdater.checkForUpdate()
+			res.onSuccess { info ->
+				if (info != null) {
+					_updateState.value = UpdateUiState.Available(info)
+					if (!isSilent)
+						postMessage("Update available: ${info.versionName}")
+				} else {
+					_updateState.value = UpdateUiState.UpToDate
+					if (!isSilent)
+						postMessage("You are on the latest version")
+				}
+			}.onFailure { err ->
+				if (isSilent) {
+					if (_updateState.value is UpdateUiState.Checking)
+						_updateState.value = UpdateUiState.Idle
+				} else {
+					val msg = err.message ?: "Network error"
+					_updateState.value = UpdateUiState.Error(msg)
+					postMessage("Update check failed: $msg")
+				}
+			}
+		}
+	}
+
+	fun downloadAndInstallUpdate() {
+		val cur = _updateState.value
+		if (cur is UpdateUiState.ReadyToInstall && cur.file.exists()) {
+			triggerApkInstall(cur.file)
+			return
+		}
+		val info = when (cur) {
+			is UpdateUiState.Available -> cur.info
+			is UpdateUiState.ReadyToInstall -> cur.info
+			else -> return
+		}
+
+		_updateState.value = UpdateUiState.Downloading(info, 0f)
+		viewModelScope.launch(Dispatchers.IO) {
+			val res = AppUpdater.downloadAndVerifyApk(_app, info) { p ->
+				_updateState.value = UpdateUiState.Downloading(info, p)
+			}
+			res.onSuccess { apkFile ->
+				_updateState.value = UpdateUiState.ReadyToInstall(info, apkFile)
+				withContext(Dispatchers.Main) {
+					triggerApkInstall(apkFile)
+				}
+			}.onFailure { err ->
+				val msg = err.message ?: "Download failed"
+				_updateState.value = UpdateUiState.Error(msg)
+				postMessage("Update failed: $msg")
+			}
+		}
+	}
+
+	private fun triggerApkInstall(apkFile: File) {
+		if (!AppUpdater.canInstallPackages(_app)) {
+			postMessage("Enable 'Install unknown apps' for TrueBlock, then tap Install")
+			runCatching { AppUpdater.openUnknownSourcesSettings(_app) }
+			return
+		}
+		runCatching {
+			AppUpdater.launchApkInstaller(_app, apkFile)
+		}.onFailure { err ->
+			postMessage("Installer error: ${err.message}")
+		}
 	}
 }

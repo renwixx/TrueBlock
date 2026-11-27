@@ -61,6 +61,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -1664,6 +1665,7 @@ fun SettingsScreen(
 ) {
 	val cfg by vm.config.collectAsState()
 	val stats by vm.engineStats.collectAsState()
+	val updateState by vm.updateState.collectAsState()
 	val accent = MaterialTheme.colorScheme.primary
 
 	var isColorPickerOpen by remember { mutableStateOf(false) }
@@ -1835,7 +1837,7 @@ fun SettingsScreen(
 				.border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
 				.padding(14.dp),
 		) {
-			Text("TrueBlock v${BuildConfig.VERSION_NAME}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+			Text("TrueBlock v${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})", fontWeight = FontWeight.Bold, fontSize = 15.sp)
 			Spacer(Modifier.height(4.dp))
 			Text(
 				text = "100% local two-tier VPN DNS + CNAME uncloaking + HTTPS/WebSocket route blocker + Cosmetic CSS + \$removeparam cleaner + Per-App SOCKS5/HTTP proxy & firewall.",
@@ -1848,6 +1850,69 @@ fun SettingsScreen(
 				fontSize = 12.sp,
 				color = accent,
 			)
+			Spacer(Modifier.height(10.dp))
+			when (val u = updateState) {
+				is UpdateUiState.Checking -> {
+					Row(verticalAlignment = Alignment.CenterVertically) {
+						CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+						Spacer(Modifier.width(8.dp))
+						Text("Checking GitHub releases...", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+					}
+				}
+				is UpdateUiState.Downloading -> {
+					Text(
+						text = "Downloading ${u.info.versionName}... ${(u.progress * 100).toInt()}%",
+						fontSize = 12.sp,
+						fontWeight = FontWeight.Medium,
+						color = accent,
+					)
+					Spacer(Modifier.height(6.dp))
+					LinearProgressIndicator(
+						progress = { u.progress.coerceIn(0f, 1f) },
+						color = accent,
+						trackColor = MaterialTheme.colorScheme.outline,
+						modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+					)
+				}
+				is UpdateUiState.Available -> {
+					Text(
+						text = "New build available: ${u.info.versionName} (${u.info.commit})",
+						fontSize = 12.sp,
+						fontWeight = FontWeight.SemiBold,
+						color = ShieldGreen,
+					)
+					if (u.info.notes.isNotEmpty()) {
+						Text(u.info.notes, fontSize = 11.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+					}
+					Spacer(Modifier.height(8.dp))
+					Button(onClick = { vm.downloadAndInstallUpdate() }) {
+						Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+						Spacer(Modifier.width(6.dp))
+						Text("Download & Install Update")
+					}
+				}
+				is UpdateUiState.ReadyToInstall -> {
+					Button(onClick = { vm.downloadAndInstallUpdate() }) {
+						Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+						Spacer(Modifier.width(6.dp))
+						Text("Install ${u.info.versionName}")
+					}
+				}
+				else -> {
+					Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+						OutlinedButton(onClick = { vm.checkForUpdates(isSilent = false) }) {
+							Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
+							Spacer(Modifier.width(6.dp))
+							Text("Check for Updates")
+						}
+						if (u is UpdateUiState.UpToDate) {
+							Text("Up to date", fontSize = 12.sp, color = ShieldGreen)
+						} else if (u is UpdateUiState.Error) {
+							Text(u.message, fontSize = 11.5.sp, color = ShieldRed, maxLines = 1, overflow = TextOverflow.Ellipsis)
+						}
+					}
+				}
+			}
 		}
 
 		Spacer(Modifier.height(24.dp))

@@ -14,6 +14,7 @@ import com.renwixx.trueadblocker.data.escapeSqlLike
 import com.renwixx.trueadblocker.engine.FastRouteRule
 import com.renwixx.trueadblocker.engine.PrivacySanitizer
 import com.renwixx.trueadblocker.engine.RuleEngine
+import com.renwixx.trueadblocker.net.AppUpdater
 import com.renwixx.trueadblocker.net.CertAuthority
 import com.renwixx.trueadblocker.net.DnsWire
 import com.renwixx.trueadblocker.net.MitmProxy
@@ -1176,5 +1177,10 @@ class ExampleUnitTest {
 			shortenUrlForDisplay("cdn.example.com/api/v2/users/42/items?token=secret&page=3"),
 		)
 		assertEquals("example.com/short", shortenUrlForDisplay("example.com/short"))
+
+		assertTrue(AppUpdater.isRemoteNewer(105, "abc1234", 104, "def5678"))
+		assertFalse(AppUpdater.isRemoteNewer(104, "abc1234", 104, "abc1234"))
+		assertTrue(AppUpdater.isRemoteNewer(104, "abc1234", 104, "def5678"))
+		assertFalse(AppUpdater.isRemoteNewer(103, "abc1234", 104, "def5678"))
 	}
 }
