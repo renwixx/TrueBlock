@@ -1183,4 +1183,44 @@ class ExampleUnitTest {
 		assertTrue(AppUpdater.isRemoteNewer(104, "abc1234", 104, "def5678"))
 		assertFalse(AppUpdater.isRemoteNewer(103, "abc1234", 104, "def5678"))
 	}
+
+	@Test
+	fun unknownOrEvictedTcpFlowReceivesImmediateRstInsteadOfHanging() {
+		val tunOut = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
+		val router = TunL3Router(
+			_configProvider = { AppConfig() },
+			_pushTraffic = {},
+			_cm = null,
+			_pm = null,
+			_protectSocket = { true },
+			_protectDatagram = { true },
+			_transportProvider = { true to false },
+			_onBlockedHit = {},
+			_writeTunPacket = { pkt -> tunOut.offer(pkt) },
+		)
+
+		val clientIp = byteArrayOf(10, 111, 222.toByte(), 2)
+		val tgDcIp = byteArrayOf(149.toByte(), 154.toByte(), 167.toByte(), 51)
+		val stalePshAck = TunL3Router.buildIpv4TcpPacket(
+			srcIp = clientIp,
+			dstIp = tgDcIp,
+			srcPort = 54321,
+			dstPort = 443,
+			seqNum = 900_001L,
+			ackNum = 777_123L,
+			flags = TunL3Router.FLAG_PSH or TunL3Router.FLAG_ACK,
+			payload = "MTPROTO_PING".toByteArray(Charsets.US_ASCII),
+		)
+		router.handleIpv4Packet(stalePshAck, stalePshAck.size)
+
+		val rst = tunOut.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+		router.closeAll()
+
+		assertNotNull("Expected immediate TCP RST for unknown/evicted TCP flow", rst)
+		val flags = rst!![33].toInt() and 0xFF
+		assertTrue((flags and TunL3Router.FLAG_RST) != 0)
+		assertEquals(777_123L, TunL3Router.u32(rst, 24))
+		assertEquals(0, DnsWire.ipv4Checksum(rst, 0, 20))
+		assertEquals(0, TunL3Router.tcpChecksum(tgDcIp, clientIp, rst, 20, rst.size - 20))
+	}
 }

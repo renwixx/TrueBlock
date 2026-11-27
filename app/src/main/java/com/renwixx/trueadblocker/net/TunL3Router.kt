@@ -50,8 +50,8 @@ class TunL3Router(
 	private val _tunMtu = tunMtu.coerceIn(1280, 9000)
 	private val _tcpMss = (_tunMtu - 40).coerceIn(536, DEFAULT_TCP_MSS)
 	private val _pool: ExecutorService = ThreadPoolExecutor(
-		4,
-		512,
+		8,
+		2048,
 		60L,
 		TimeUnit.SECONDS,
 		SynchronousQueue(),
@@ -518,10 +518,14 @@ class TunL3Router(
 		if (isSyn && !isAck) {
 			val cur = _tcpSessions[flowKey]
 			if (cur != null && !cur.isClosed) {
-				val resendSynAck = synchronized(cur) { cur.synAckPacket }
-				if (resendSynAck != null)
-					_writeTunPacket(resendSynAck)
-				return
+				if (cur.initialClientSeq == seqNum) {
+					val resendSynAck = synchronized(cur) { cur.synAckPacket }
+					if (resendSynAck != null)
+						_writeTunPacket(resendSynAck)
+					return
+				}
+				_tcpSessions.remove(flowKey, cur)
+				cur.closeQuietly()
 			}
 
 			val cfg = _configProvider()
@@ -590,6 +594,7 @@ class TunL3Router(
 				serverIp = dstIp,
 				clientPort = srcPort,
 				serverPort = dstPort,
+				initialClientSeq = seqNum,
 				clientNextSeq = (seqNum + 1L) and 0xFFFFFFFFL,
 				serverNextSeq = initServerSeq,
 				clientLastAck = (initServerSeq + 1L) and 0xFFFFFFFFL,
@@ -630,9 +635,18 @@ class TunL3Router(
 			return
 		}
 
-		val session = _tcpSessions[flowKey] ?: return
 		val payloadOff = ihl + dataOff
 		val payloadLen = pktEnd - payloadOff
+		val session = _tcpSessions[flowKey]
+		if (session == null || session.isClosed) {
+			// RFC 9293 section 3.5.2: send RST for segments targeting closed/evicted flows so client reconnects immediately
+			val rstSeq = if (isAck) ackNum else 0L
+			val rstFlags = if (isAck) FLAG_RST else (FLAG_RST or FLAG_ACK)
+			val rstAck = if (isAck) 0L else ((seqNum + payloadLen.toLong() + (if (isFin) 1L else 0L)) and 0xFFFFFFFFL)
+			val rst = buildIpv4TcpPacket(dstIp, srcIp, dstPort, srcPort, rstSeq, rstAck, rstFlags, ByteArray(0))
+			_writeTunPacket(rst)
+			return
+		}
 		val payload = if (payloadLen > 0) pkt.copyOfRange(payloadOff, pktEnd) else ByteArray(0)
 
 		var ackReplyPkt: ByteArray? = null
@@ -816,6 +830,8 @@ class TunL3Router(
 
 			finishServerFinHandshake(session, dstIp, srcIp, dstPort, srcPort)
 		} catch (_: Throwable) {
+			if (!session.isClosed)
+				sendSessionRst(session)
 		} finally {
 			_tcpSessions.remove(session.key, session)
 			session.closeQuietly()
@@ -936,7 +952,8 @@ class TunL3Router(
 						}
 					}
 				} catch (_: Throwable) {
-					_tcpSessions.remove(session.key, session)
+					if (_tcpSessions.remove(session.key, session))
+						sendSessionRst(session)
 					session.closeQuietly()
 				}
 			}
@@ -944,7 +961,8 @@ class TunL3Router(
 		}.getOrDefault(false)
 
 		if (!isWriterStarted) {
-			_tcpSessions.remove(session.key, session)
+			if (_tcpSessions.remove(session.key, session))
+				sendSessionRst(session)
 			session.closeQuietly()
 			return
 		}
@@ -1092,10 +1110,32 @@ class TunL3Router(
 
 			finishServerFinHandshake(session, dstIp, srcIp, dstPort, srcPort)
 		} catch (_: Throwable) {
+			if (!session.isClosed)
+				sendSessionRst(session)
 		} finally {
 			_tcpSessions.remove(session.key, session)
 			session.closeQuietly()
 		}
+	}
+
+	private fun sendSessionRst(session: TcpFlowSession) {
+		val sSeq: Long
+		val cSeq: Long
+		synchronized(session) {
+			sSeq = session.serverNextSeq
+			cSeq = session.clientNextSeq
+		}
+		val rst = buildIpv4TcpPacket(
+			session.serverIp,
+			session.clientIp,
+			session.serverPort,
+			session.clientPort,
+			sSeq,
+			cSeq,
+			FLAG_RST or FLAG_ACK,
+			ByteArray(0),
+		)
+		_writeTunPacket(rst)
 	}
 
 	private fun finishServerFinHandshake(
@@ -1253,8 +1293,10 @@ class TunL3Router(
 		if (_tcpSessions.size < MAX_TCP_SESSIONS)
 			return
 		val oldest = _tcpSessions.entries.minByOrNull { it.value.lastActiveMs } ?: return
-		if (_tcpSessions.remove(oldest.key, oldest.value))
+		if (_tcpSessions.remove(oldest.key, oldest.value)) {
+			sendSessionRst(oldest.value)
 			oldest.value.closeQuietly()
+		}
 	}
 
 	private fun ensureUdpCapacity() {
@@ -1271,8 +1313,11 @@ class TunL3Router(
 		val tcpIt = _tcpSessions.entries.iterator()
 		while (tcpIt.hasNext()) {
 			val s = tcpIt.next().value
-			if (s.isClosed || now - s.lastActiveMs > TCP_IDLE_TIMEOUT_MS) {
+			val limitMs = if (s.isClientFinReceived) TCP_HALF_CLOSED_TIMEOUT_MS else TCP_IDLE_TIMEOUT_MS
+			if (s.isClosed || now - s.lastActiveMs > limitMs) {
 				tcpIt.remove()
+				if (!s.isClosed)
+					sendSessionRst(s)
 				s.closeQuietly()
 			}
 		}
@@ -1299,10 +1344,11 @@ class TunL3Router(
 		private const val MAX_IN_FLIGHT_BYTES = 262_144
 		private const val TCP_READ_TICK_MS = 250
 		private const val TCP_RTO_MS = 300L
-		private const val TCP_IDLE_TIMEOUT_MS = 300_000L
+		private const val TCP_HALF_CLOSED_TIMEOUT_MS = 15_000L
+		private const val TCP_IDLE_TIMEOUT_MS = 900_000L
 		private const val UDP_IDLE_TIMEOUT_MS = 180_000L
-		private const val MAX_TCP_SESSIONS = 1024
-		private const val MAX_UDP_SESSIONS = 512
+		private const val MAX_TCP_SESSIONS = 768
+		private const val MAX_UDP_SESSIONS = 384
 
 		internal fun parseSynWindowScale(pkt: ByteArray, ihl: Int, tcpHeaderLen: Int): Int {
 			var pos = ihl + 20
@@ -1582,6 +1628,7 @@ private class TcpFlowSession(
 	val serverIp: ByteArray,
 	val clientPort: Int,
 	val serverPort: Int,
+	val initialClientSeq: Long,
 	var clientNextSeq: Long,
 	var serverNextSeq: Long,
 	var clientLastAck: Long,
