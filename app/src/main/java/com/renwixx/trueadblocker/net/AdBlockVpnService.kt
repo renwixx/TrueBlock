@@ -108,11 +108,7 @@ class AdBlockVpnService : VpnService() {
 
 		val act = intent?.action
 		if (act == ACTION_STOP) {
-			cancelSnoozeAlarmAndTicker()
-			BlockerApp.instance.prefs.update { it.copy(isVpnDesired = false, snoozeUntilMs = 0L) }
-			teardownAll()
-			stopForeground(STOP_FOREGROUND_REMOVE)
-			stopSelf()
+			requestStop()
 			return START_NOT_STICKY
 		}
 
@@ -420,7 +416,7 @@ class AdBlockVpnService : VpnService() {
 	private fun startOrReloadTunnel() {
 		val app = BlockerApp.instance
 		val cfg = app.prefs.state.value
-		if (cfg.snoozeUntilMs > System.currentTimeMillis())
+		if (!cfg.isVpnDesired || cfg.snoozeUntilMs > System.currentTimeMillis())
 			return
 
 		val transportLabel = currentTransportLabel()
@@ -933,6 +929,15 @@ class AdBlockVpnService : VpnService() {
 		_dnsWorkers = null
 	}
 
+	internal fun requestStop() {
+		cancelSnoozeAlarmAndTicker()
+		BlockerApp.instance.prefs.update { it.copy(isVpnDesired = false, snoozeUntilMs = 0L) }
+		teardownAll()
+		runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+		stopSelf()
+	}
+
+	@Synchronized
 	private fun teardownAll() {
 		_configWatchJob?.cancel()
 		_configWatchJob = null
@@ -1038,6 +1043,13 @@ class AdBlockVpnService : VpnService() {
 
 		fun stop(ctx: Context) {
 			BlockerApp.instance.prefs.update { it.copy(isVpnDesired = false, snoozeUntilMs = 0L) }
+			val active = instance
+			if (active != null) {
+				active.requestStop()
+				return
+			}
+			_runtime.value = VpnRuntimeState(isRunning = false)
+			AdBlockTileService.requestRefresh(ctx)
 			ctx.stopService(Intent(ctx, AdBlockVpnService::class.java))
 		}
 
