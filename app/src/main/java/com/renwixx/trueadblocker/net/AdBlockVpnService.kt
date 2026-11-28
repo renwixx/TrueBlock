@@ -32,6 +32,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -57,6 +58,13 @@ data class VpnRuntimeState(
 	val sessionBlocked: Long = 0L,
 )
 
+data class NotificationStats(
+	val totalRequests: Long = 0L,
+	val totalBlocked: Long = 0L,
+	val totalCname: Long = 0L,
+	val totalTrackerParams: Long = 0L,
+)
+
 private data class ActiveTunnelSpec(
 	val isFullL3: Boolean,
 	val clientIp: String,
@@ -79,6 +87,7 @@ class AdBlockVpnService : VpnService() {
 	private var _activeSpec: ActiveTunnelSpec? = null
 	private var _configWatchJob: Job? = null
 	private var _dnsWatchJob: Job? = null
+	private var _statsWatchJob: Job? = null
 	private var _snoozeTickerJob: Job? = null
 	private var _netCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -88,8 +97,12 @@ class AdBlockVpnService : VpnService() {
 	@Volatile
 	private var _isOnMobile = false
 
+	@Volatile
+	private var _lastStats = NotificationStats()
+
 	private val _dnsCache = LruCache<String, CachedDns>(2048)
 	private val _sessionBlocked = AtomicLong(0L)
+	private val _lastNotifUpdateMs = AtomicLong(0L)
 	private val _netCapsMap = ConcurrentHashMap<Network, NetworkCapabilities>()
 	private val _proxyDnsPortBlockedUntil = ConcurrentHashMap<String, Long>()
 
@@ -100,7 +113,11 @@ class AdBlockVpnService : VpnService() {
 	}
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-		val initNotif = buildNotification("Active — protecting DNS & HTTP/S routes", isSnoozed = false)
+		val initNotif = buildNotification(
+			title = "TrueBlock · Active",
+			statusText = formatActiveNotificationText(_lastStats, _sessionBlocked.get()),
+			isSnoozed = false,
+		)
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 			startForeground(NOTIF_ID, initNotif, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
 		else
@@ -149,7 +166,8 @@ class AdBlockVpnService : VpnService() {
 		cancelSnoozeAlarmAndTicker()
 		BlockerApp.instance.prefs.update { it.copy(isVpnDesired = false, snoozeUntilMs = 0L) }
 		teardownAll()
-		stopForeground(STOP_FOREGROUND_REMOVE)
+		runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+		showStoppedNotification(this, _lastStats)
 		stopSelf()
 		super.onRevoke()
 	}
@@ -159,6 +177,7 @@ class AdBlockVpnService : VpnService() {
 		unregisterTransportWatcher()
 		teardownAll()
 		runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+		showStoppedNotification(this, _lastStats)
 		instance = null
 		_scope.cancel()
 		super.onDestroy()
@@ -173,6 +192,7 @@ class AdBlockVpnService : VpnService() {
 	private fun incrementSessionBlocked() {
 		val updated = _sessionBlocked.incrementAndGet()
 		_runtime.value = _runtime.value.copy(sessionBlocked = updated)
+		maybeRefreshActiveNotification(isForce = false)
 	}
 
 	// Keeps ForegroundService alive during Snooze so Android 15-17 never kills the process or blocks FGS restart
@@ -183,7 +203,12 @@ class AdBlockVpnService : VpnService() {
 		_proxy = null
 
 		scheduleSnoozeWakeupAlarm(untilMs)
-		updateNotification("Snoozed — protection temporarily paused", isSnoozed = true, snoozeUntilMs = untilMs)
+		updateNotification(
+			title = "TrueBlock · Snoozed",
+			text = formatPausedOrSnoozedText("Protection paused", _lastStats),
+			isSnoozed = true,
+			snoozeUntilMs = untilMs,
+		)
 
 		_snoozeTickerJob?.cancel()
 		_snoozeTickerJob = _scope.launch {
@@ -289,6 +314,28 @@ class AdBlockVpnService : VpnService() {
 						_dnsCache.evictAll()
 						_proxyDnsPortBlockedUntil.clear()
 						_dohHttp?.connectionPool?.evictAll()
+					}
+			}
+		}
+
+		if (_statsWatchJob == null) {
+			val db = BlockerApp.instance.db
+			_statsWatchJob = _scope.launch {
+				combine(
+					db.trafficDao().observeTotalsEntity(),
+					db.trackerParamDao().observeTotalRemoved(),
+				) { totals, params ->
+					NotificationStats(
+						totalRequests = totals?.totalRequests ?: 0L,
+						totalBlocked = totals?.totalBlocked ?: 0L,
+						totalCname = totals?.totalCname ?: 0L,
+						totalTrackerParams = params,
+					)
+				}
+					.distinctUntilChanged()
+					.collect { stats ->
+						_lastStats = stats
+						maybeRefreshActiveNotification(isForce = false)
 					}
 			}
 		}
@@ -432,7 +479,11 @@ class AdBlockVpnService : VpnService() {
 				proxyPort = 0,
 				sessionBlocked = _sessionBlocked.get(),
 			)
-			updateNotification("Paused on $transportLabel network", isSnoozed = false)
+			updateNotification(
+				title = "TrueBlock · Paused ($transportLabel)",
+				text = formatPausedOrSnoozedText("Paused on $transportLabel", _lastStats),
+				isSnoozed = false,
+			)
 			return
 		}
 
@@ -877,10 +928,6 @@ class AdBlockVpnService : VpnService() {
 		transportLabel: String,
 		localProxyPort: Int,
 	) {
-		val baseMode = if (cfg.isHttpsFiltering && app.ca.isReady) "DNS + HTTPS Routes" else "DNS"
-		val l3Suffix = if (isFullL3) " + Proxy/FW" else ""
-		updateNotification("Active — $baseMode$l3Suffix ($transportLabel)", isSnoozed = false)
-
 		_runtime.value = VpnRuntimeState(
 			isRunning = true,
 			isPausedByNetworkRule = false,
@@ -891,6 +938,7 @@ class AdBlockVpnService : VpnService() {
 			proxyPort = localProxyPort,
 			sessionBlocked = _sessionBlocked.get(),
 		)
+		maybeRefreshActiveNotification(isForce = true)
 		AdBlockTileService.requestRefresh(this)
 	}
 
@@ -934,6 +982,7 @@ class AdBlockVpnService : VpnService() {
 		BlockerApp.instance.prefs.update { it.copy(isVpnDesired = false, snoozeUntilMs = 0L) }
 		teardownAll()
 		runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+		showStoppedNotification(this, _lastStats)
 		stopSelf()
 	}
 
@@ -943,6 +992,8 @@ class AdBlockVpnService : VpnService() {
 		_configWatchJob = null
 		_dnsWatchJob?.cancel()
 		_dnsWatchJob = null
+		_statsWatchJob?.cancel()
+		_statsWatchJob = null
 		stopTunnelOnly()
 		_proxy?.stop()
 		_proxy = null
@@ -951,21 +1002,28 @@ class AdBlockVpnService : VpnService() {
 	}
 
 	private fun ensureNotificationChannel() {
-		val nm = getSystemService(NotificationManager::class.java) ?: return
-		val channel = NotificationChannel(
-			CHANNEL_ID,
-			"TrueBlock Protection",
-			NotificationManager.IMPORTANCE_LOW,
-		).apply {
-			description = "Persistent local VPN ad & route filtering status"
-			setShowBadge(false)
-		}
-		nm.createNotificationChannel(channel)
+		ensureNotificationChannel(this)
 	}
 
-	private fun updateNotification(text: String, isSnoozed: Boolean, snoozeUntilMs: Long = 0L) {
+	private fun maybeRefreshActiveNotification(isForce: Boolean) {
+		val state = _runtime.value
+		if (!state.isRunning || state.isSnoozed || state.isPausedByNetworkRule)
+			return
+		val now = System.currentTimeMillis()
+		if (!isForce) {
+			val prev = _lastNotifUpdateMs.get()
+			if (now - prev < NOTIF_UPDATE_MIN_INTERVAL_MS)
+				return
+		}
+		_lastNotifUpdateMs.set(now)
+		val title = "TrueBlock · Active (${state.activeTransport})"
+		val text = formatActiveNotificationText(_lastStats, _sessionBlocked.get())
+		updateNotification(title = title, text = text, isSnoozed = false)
+	}
+
+	private fun updateNotification(title: String, text: String, isSnoozed: Boolean, snoozeUntilMs: Long = 0L) {
 		val nm = getSystemService(NotificationManager::class.java) ?: return
-		nm.notify(NOTIF_ID, buildNotification(text, isSnoozed, snoozeUntilMs))
+		runCatching { nm.notify(NOTIF_ID, buildNotification(title, text, isSnoozed, snoozeUntilMs)) }
 	}
 
 	private fun buildResumePendingIntent(): PendingIntent {
@@ -977,16 +1035,13 @@ class AdBlockVpnService : VpnService() {
 		)
 	}
 
-	private fun buildNotification(statusText: String, isSnoozed: Boolean, snoozeUntilMs: Long = 0L): Notification {
-		val openIntent = PendingIntent.getActivity(
-			this,
-			1,
-			Intent(this, MainActivity::class.java).apply {
-				flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-			},
-			PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-		)
-
+	private fun buildNotification(
+		title: String,
+		statusText: String,
+		isSnoozed: Boolean,
+		snoozeUntilMs: Long = 0L,
+	): Notification {
+		val openIntent = buildOpenAppPendingIntent(this)
 		val stopIntent = PendingIntent.getService(
 			this,
 			2,
@@ -996,10 +1051,14 @@ class AdBlockVpnService : VpnService() {
 
 		val builder = NotificationCompat.Builder(this, CHANNEL_ID)
 			.setSmallIcon(android.R.drawable.ic_secure)
-			.setContentTitle("TrueBlock")
+			.setContentTitle(title)
 			.setContentText(statusText)
+			.setStyle(NotificationCompat.BigTextStyle().bigText(statusText))
 			.setOngoing(true)
+			.setAutoCancel(false)
 			.setSilent(true)
+			.setOnlyAlertOnce(true)
+			.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
 			.setContentIntent(openIntent)
 
 		if (isSnoozed) {
@@ -1025,7 +1084,8 @@ class AdBlockVpnService : VpnService() {
 		const val EXTRA_SNOOZE_MINUTES = "snooze_minutes"
 
 		private const val CHANNEL_ID = "trueadblocker_vpn_channel"
-		private const val NOTIF_ID = 1001
+		internal const val NOTIF_ID = 1001
+		private const val NOTIF_UPDATE_MIN_INTERVAL_MS = 2_000L
 		private const val DEFAULT_VPN_CLIENT_IP = "10.111.222.2"
 		private const val DEFAULT_VPN_DNS_IP = "10.111.222.1"
 
@@ -1050,7 +1110,102 @@ class AdBlockVpnService : VpnService() {
 			}
 			_runtime.value = VpnRuntimeState(isRunning = false)
 			AdBlockTileService.requestRefresh(ctx)
+			showStoppedNotification(ctx)
 			ctx.stopService(Intent(ctx, AdBlockVpnService::class.java))
+		}
+
+		fun showStoppedNotification(ctx: Context, stats: NotificationStats = NotificationStats()) {
+			ensureNotificationChannel(ctx)
+			val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+			val openIntent = buildOpenAppPendingIntent(ctx)
+			val startActionIntent = if (runCatching { VpnService.prepare(ctx) == null }.getOrDefault(false)) {
+				PendingIntent.getForegroundService(
+					ctx,
+					4,
+					Intent(ctx, AdBlockVpnService::class.java).apply { action = ACTION_START },
+					PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+				)
+			} else {
+				openIntent
+			}
+			val text = formatPausedOrSnoozedText("Filtering stopped", stats)
+			val notif = NotificationCompat.Builder(ctx, CHANNEL_ID)
+				.setSmallIcon(android.R.drawable.ic_secure)
+				.setContentTitle("TrueBlock · Stopped")
+				.setContentText(text)
+				.setStyle(NotificationCompat.BigTextStyle().bigText(text))
+				.setOngoing(true)
+				.setAutoCancel(false)
+				.setSilent(true)
+				.setOnlyAlertOnce(true)
+				.setContentIntent(openIntent)
+				.addAction(0, "Start", startActionIntent)
+				.build()
+			runCatching { nm.notify(NOTIF_ID, notif) }
+		}
+
+		internal fun formatActiveNotificationText(stats: NotificationStats, sessionBlocked: Long): String {
+			val blocked = stats.totalBlocked.coerceAtLeast(sessionBlocked)
+			val total = stats.totalRequests.coerceAtLeast(blocked)
+			val sb = StringBuilder()
+			sb.append("Blocked ")
+			sb.append(formatCompactCount(blocked))
+			sb.append(" / ")
+			sb.append(formatCompactCount(total))
+			if (total > 0L) {
+				val pct = (blocked * 100L / total).coerceIn(0L, 100L)
+				sb.append(" (").append(pct).append("%)")
+			}
+			sb.append(" · Session ").append(formatCompactCount(sessionBlocked))
+			if (stats.totalTrackerParams > 0L)
+				sb.append(" · Params ").append(formatCompactCount(stats.totalTrackerParams))
+			if (stats.totalCname > 0L)
+				sb.append(" · CNAME ").append(formatCompactCount(stats.totalCname))
+
+			return sb.toString()
+		}
+
+		internal fun formatPausedOrSnoozedText(prefix: String, stats: NotificationStats): String {
+			val blocked = stats.totalBlocked
+			val total = stats.totalRequests.coerceAtLeast(blocked)
+			if (total <= 0L)
+				return prefix
+
+			return "$prefix · Blocked ${formatCompactCount(blocked)} / ${formatCompactCount(total)}"
+		}
+
+		internal fun formatCompactCount(value: Long): String {
+			val n = value.coerceAtLeast(0L)
+			return when {
+				n >= 1_000_000L -> String.format(java.util.Locale.US, "%.1fM", n / 1_000_000.0)
+				n >= 10_000L -> "${n / 1_000L}K"
+				n >= 1_000L -> String.format(java.util.Locale.US, "%.1fK", n / 1_000.0)
+				else -> n.toString()
+			}
+		}
+
+		private fun ensureNotificationChannel(ctx: Context) {
+			val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+			val channel = NotificationChannel(
+				CHANNEL_ID,
+				"TrueBlock Protection",
+				NotificationManager.IMPORTANCE_LOW,
+			).apply {
+				description = "Persistent local VPN ad & route filtering status"
+				setShowBadge(false)
+			}
+			nm.createNotificationChannel(channel)
+		}
+
+		private fun buildOpenAppPendingIntent(ctx: Context): PendingIntent {
+			return PendingIntent.getActivity(
+				ctx,
+				1,
+				Intent(ctx, MainActivity::class.java).apply {
+					flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+				},
+				PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+			)
 		}
 
 		fun snooze(ctx: Context, minutes: Int) {

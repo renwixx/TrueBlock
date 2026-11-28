@@ -15,5 +15,7 @@ class BootReceiver : BroadcastReceiver() {
 		val cfg = BlockerApp.instance.prefs.state.value
 		if (cfg.isStartOnBoot && cfg.isVpnDesired && VpnService.prepare(context) == null)
 			AdBlockVpnService.start(context)
+		else
+			AdBlockVpnService.showStoppedNotification(context)
 	}
 }

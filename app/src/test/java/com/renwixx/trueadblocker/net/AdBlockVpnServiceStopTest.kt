@@ -1,12 +1,16 @@
 package com.renwixx.trueadblocker.net
 
+import android.app.Notification
+import android.app.NotificationManager
 import android.content.Intent
 import android.os.ParcelFileDescriptor
 import androidx.test.core.app.ApplicationProvider
 import com.renwixx.trueadblocker.BlockerApp
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -49,7 +53,31 @@ class AdBlockVpnServiceStopTest {
 		assertNull(getPrivateField(service, "_tunFd"))
 		assertTrue(shadowOf(service).isStoppedBySelf)
 		assertTrue(runCatching { fakeTun.fileDescriptor.valid() }.getOrDefault(false).not())
+		val nm = app.getSystemService(NotificationManager::class.java)
+		val stoppedNotif = shadowOf(nm).getNotification(AdBlockVpnService.NOTIF_ID)
+		assertNotNull(stoppedNotif)
+		assertEquals("TrueBlock · Stopped", stoppedNotif.extras.getString(Notification.EXTRA_TITLE))
+		assertTrue((stoppedNotif.flags and Notification.FLAG_ONGOING_EVENT) != 0)
+		assertTrue(stoppedNotif.actions?.any { it.title == "Start" } == true)
 		fakeFile.delete()
+	}
+
+	@Test
+	fun activeNotificationFormatsMicroStatsCleanly() {
+		val text = AdBlockVpnService.formatActiveNotificationText(
+			stats = NotificationStats(
+				totalRequests = 8_400L,
+				totalBlocked = 1_260L,
+				totalCname = 5L,
+				totalTrackerParams = 18L,
+			),
+			sessionBlocked = 42L,
+		)
+		assertEquals("Blocked 1.3K / 8.4K (15%) · Session 42 · Params 18 · CNAME 5", text)
+		assertEquals("999", AdBlockVpnService.formatCompactCount(999L))
+		assertEquals("1.2K", AdBlockVpnService.formatCompactCount(1_240L))
+		assertEquals("12K", AdBlockVpnService.formatCompactCount(12_900L))
+		assertEquals("1.5M", AdBlockVpnService.formatCompactCount(1_500_000L))
 	}
 
 	@Test

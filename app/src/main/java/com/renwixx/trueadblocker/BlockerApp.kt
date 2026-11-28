@@ -7,6 +7,7 @@ import com.renwixx.trueadblocker.data.AppDatabase
 import com.renwixx.trueadblocker.data.AppPrefs
 import com.renwixx.trueadblocker.data.TrafficPipeline
 import com.renwixx.trueadblocker.engine.RuleEngine
+import com.renwixx.trueadblocker.net.AdBlockVpnService
 import com.renwixx.trueadblocker.net.CertAuthority
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,8 @@ class BlockerApp : Application() {
 		traffic = TrafficPipeline(db.trafficDao(), db.trackerParamDao(), prefs)
 		engine = RuleEngine(this, db)
 		ca = CertAuthority(this, isAutoLoad = false)
+		if (!AdBlockVpnService.runtime.value.isRunning)
+			AdBlockVpnService.showStoppedNotification(this)
 
 		_appScope.launch {
 			ca.loadExistingIfPresent()
